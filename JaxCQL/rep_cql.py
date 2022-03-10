@@ -38,19 +38,19 @@ class REPCQL(object):
         config.cql_lagrange = False
         config.cql_target_action_gap = 1.0
         config.cql_temp = 1.0
-        config.cql_min_q_weight = 5.0
+        config.cql_min_q_weight = 0.0
         config.cql_max_target_backup = False
         config.cql_clip_diff_min = -np.inf
         config.cql_clip_diff_max = np.inf
         config.epsilon = 1e-4
-        config.latent_scale = 1.0
         config.original_q = True
+        config.distance_logging = True
 
         if updates is not None:
             config.update(ConfigDict(updates).copy_and_resolve_references())
         return config
 
-    def __init__(self, config, policy, qf, rep):
+    def __init__(self, config, policy, qf, rep, bc_agent):
         self.config = self.get_default_config(config)
         self.policy = policy
         self.qf = qf
@@ -61,6 +61,9 @@ class REPCQL(object):
         self.action_dim = rep.encoder.action_dim
         self.latent_action_dim = rep.encoder.latent_action_dim
         self.rep = rep
+        self.bc_policy = bc_agent.policy
+        self.bc_agent = bc_agent
+        self.latent_scale = policy.action_scale
         
 
         self._train_states = {}
@@ -152,6 +155,16 @@ class REPCQL(object):
             new_actions_rep, log_pi = self.policy.apply(train_params['policy'], split_rng, observations)
             new_actions = self.decoder.apply(self.rep.train_params['decoder'], observations, new_actions_rep)
 
+            if self.config.distance_logging:
+                latent_dis_accuracy = self.discriminator.apply(self.rep.train_params['discriminator'], observations, new_actions_rep).mean()
+                bc_log_prob = self.bc_agent.log_likelihood(observations, actions)
+                
+                rng, split_rng = jax.random.split(rng)
+                actions_rep, _ = self.encoder.apply(self.rep.train_params['encoder'], split_rng, observations, actions)
+                actions_rep = jnp.clip(actions_rep, -1.0 * self.latent_scale + self.config.epsilon, 1.0 * self.latent_scale - self.config.epsilon) 
+                dataset_log_prob = -self.policy.apply(train_params['policy'], observations, actions_rep, method=self.policy.log_prob).mean()
+
+
             if self.config.use_automatic_entropy_tuning:
                 alpha_loss = -self.log_alpha.apply(train_params['log_alpha']) * (log_pi + self.config.target_entropy).mean()
                 loss_collection['log_alpha'] = alpha_loss
@@ -164,7 +177,7 @@ class REPCQL(object):
             if bc:
                 rng, split_rng = jax.random.split(rng)
                 actions_rep, _ = self.encoder.apply(self.rep.train_params['encoder'], split_rng, observations, actions) 
-                actions_rep = jnp.clip(actions_rep, -1 * self.config.latent_scale + self.config.epsilon, self.config.latent_scale - self.config.epsilon)
+                actions_rep = jnp.clip(actions_rep, -1 * self.latent_scale + self.config.epsilon, self.latent_scale - self.config.epsilon)
                 log_probs = self.policy.apply(train_params['policy'], observations, actions_rep, method=self.policy.log_prob)
                 policy_loss = (alpha*log_pi - log_probs).mean()
             else:
@@ -188,7 +201,7 @@ class REPCQL(object):
                 q2_pred = self.qf.apply(train_params['qf2'], observations, actions)
             else:
                 actions_rep, _ = self.encoder.apply(self.rep.train_params['encoder'], split_rng, observations, actions) 
-                actions_rep = jnp.clip(actions_rep, -1 * self.config.latent_scale + self.config.epsilon, 1 * self.config.latent_scale - self.config.epsilon)
+                actions_rep = jnp.clip(actions_rep, -1 * self.latent_scale + self.config.epsilon, 1 * self.latent_scale - self.config.epsilon)
                 q1_pred = self.qf.apply(train_params['qf1'],observations, actions_rep)
                 q2_pred = self.qf.apply(train_params['qf1'],observations, actions_rep)
 
@@ -278,7 +291,7 @@ class REPCQL(object):
                     rng, split_rng = jax.random.split(rng)
                     cql_random_actions = jax.random.uniform(
                         split_rng, shape=(batch_size, self.config.cql_n_actions, self.latent_action_dim),
-                        minval=-self.config.latent_scale, maxval=self.config.latent_scale
+                        minval=-self.latent_scale, maxval=self.latent_scale
                     )
 
                     rng, split_rng = jax.random.split(rng)
@@ -413,6 +426,13 @@ class REPCQL(object):
                 cql_q2_next_actions=aux_values['cql_q2_next_actions'].mean(),
                 alpha_prime=aux_values['alpha_prime'],
                 alpha_prime_loss=aux_values['alpha_prime_loss'],
+            ), 'cql'))
+        
+        if self.config.distance_logging:
+            metrics.update(prefix_metrics(dict(
+                latent_dis_accuracy=aux_values['latent_dis_accuracy'],
+                bc_log_prob=aux_values['bc_log_prob'],
+                dataset_log_prob=aux_values['dataset_log_prob'],
             ), 'cql'))
 
         return new_train_states, new_target_qf_params, metrics

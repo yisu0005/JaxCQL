@@ -1,6 +1,6 @@
 name: JaxCQL
-channels:
-    - https://conda.anaconda.org/conda-forge
+# channels:
+#     - https://conda.anaconda.org/conda-forge
 dependencies:
     - python=3.8
     - pip
@@ -13,8 +13,10 @@ dependencies:
     - jupyter
     - mpi4py
     - patchelf
-    - jax
     - pip:
+        - -f https://storage.googleapis.com/jax-releases/jax_releases.html
+        # - -f https://storage.googleapis.com/jax-releases/cuda11/jaxlib-0.1.76+cuda11.cudnn82-cp37-none-manylinux2010_x86_64.whl
+        - jax[cuda]==0.2.26
         - flax
         - optax
         - distrax
@@ -22,8 +24,8 @@ dependencies:
         - scikit-image
         - tqdm
         - seaborn
-        - gym
-        - mujoco_py
+        - gym==0.21.0
+        - mujoco_py==2.0.2.5
         - box2d
         - absl-py
         - opencv-python

@@ -30,10 +30,9 @@ class REP(object):
         config.optimizer_b1 = 0.5
         config.optimizer_b2 = 0.999
         config.recon_alpha = 0.05
-        config.gp_alpha = 10
-        config.opt_n_critic = 1
-        config.prior = 'gaussian'
+        config.prior = 'uniform'
         config.smooth_dis = False
+        config.latent_stats_logging = True
 
         if updates is not None:
             config.update(ConfigDict(updates).copy_and_resolve_references())
@@ -48,6 +47,7 @@ class REP(object):
         self.observation_dim = encoder.observation_dim
         self.action_dim = encoder.action_dim
         self.latent_ac_dim = encoder.latent_action_dim
+        self.dropout = discriminator.dropout
 
         self._train_states = {}
 
@@ -129,9 +129,18 @@ class REP(object):
                 bernoulli = jax.random.bernoulli(split_rng, 0.5, jnp.shape(valid)) * 0.2
                 valid = valid - bernoulli
 
-            real_loss = adversarial_loss(self.discriminator.apply(train_params['discriminator'], observations, marginals), valid)
-            latent_actions_cp = jax.lax.stop_gradient(latent_actions)
-            fake_loss = adversarial_loss(self.discriminator.apply(train_params['discriminator'], observations, latent_actions_cp), fake)
+            if self.dropout:
+                rng, split_rng, split_rng2 = jax.random.split(rng, 3) 
+                real_loss = adversarial_loss(self.discriminator.apply(train_params['discriminator'], observations, marginals, train=True,
+                            rngs={'dropout': split_rng}), valid)
+                latent_actions_cp = jax.lax.stop_gradient(latent_actions)
+                fake_loss = adversarial_loss(self.discriminator.apply(train_params['discriminator'], observations, latent_actions_cp, train=True,
+                            rngs={'dropout': split_rng2}), fake)
+            else:
+                real_loss = adversarial_loss(self.discriminator.apply(train_params['discriminator'], observations, marginals), valid)
+                latent_actions_cp = jax.lax.stop_gradient(latent_actions)
+                fake_loss = adversarial_loss(self.discriminator.apply(train_params['discriminator'], observations, latent_actions_cp), fake)
+
             d_loss = (real_loss + fake_loss) / 2
             loss_collection['discriminator'] = d_loss
 
@@ -145,6 +154,20 @@ class REP(object):
                 self.discriminator.apply(train_params['discriminator'], observations, latent_actions_cp)
              ) <= 0.5
             fake_accuracy = jnp.mean(fake_pred1 * 1.0)
+
+            ### latent action statistics ###
+            if self.config.latent_stats_logging:
+                _ , actions_mean, actions_logstd = self.encoder.apply(train_params['encoder'], split_rng, observations, actions, method=self.encoder.get_statistics)
+                ac_std = jnp.exp(actions_logstd)
+                latent_ac_max = jnp.max(actions_mean)
+                latent_ac_min = jnp.min(actions_mean)
+                latent_ac_mean = jnp.mean(actions_mean)
+                latent_ac_std = jnp.std(actions_mean)
+
+                latent_ac_std_max = jnp.max(ac_std)
+                latent_ac_std_min = jnp.min(ac_std)
+                latent_ac_std_mean = jnp.mean(ac_std)
+                latent_ac_std_std = jnp.std(ac_std) 
 
             return tuple(loss_collection[key] for key in self.model_keys), locals()
 
@@ -163,6 +186,20 @@ class REP(object):
             real_accuracy=aux_values['real_accuracy'],
             fake_accuracy=aux_values['fake_accuracy'],
         )
+
+        if self.config.latent_stats_logging:
+            metrics.update(prefix_metrics(dict(
+                latent_ac_max=aux_values['latent_ac_max'],
+                latent_ac_min=aux_values['latent_ac_min'],
+                latent_ac_mean=aux_values['latent_ac_mean'],
+                latent_ac_std=aux_values['latent_ac_std'],
+
+                latent_ac_std_max=aux_values['latent_ac_std_max'],
+                latent_ac_std_min=aux_values['latent_ac_std_min'],
+                latent_ac_std_mean=aux_values['latent_ac_std_mean'],
+                latent_ac_std_std=aux_values['latent_ac_std_std'],
+
+            ), 'latent_actions'))
 
         return new_train_states, metrics
 

@@ -18,6 +18,7 @@ import absl.flags
 
 from .rep_cql import REPCQL
 from .rep import REP
+from .bc_policy import BC
 from .replay_buffer import get_d4rl_dataset, subsample_batch
 from .jax_utils import batch_to_jax
 from .model import TanhGaussianPolicy, FullyConnectedQFunction, SamplerPolicy, SamplerDecoder, Discriminator, ActionDecoder, ActionRepresentationPolicy
@@ -49,17 +50,25 @@ FLAGS_DEF = define_flags_with_default(
     n_train_step_per_epoch=1000,
     eval_period=10,
     eval_n_trajs=5,
-
+    
+    train_decorrelation=True,
+    train_bc=True,
+    train_cql=True,
     encoder_no_tanh=True,
     action_scale=1.0,
     discriminator_arch='512-256',
     encoder_arch='256-256',
     decoder_arch='256-256',
     decorrelation_method='GAN',
-    decorrelation_epochs=5,
-    decor_n_train_step_per_epoch=50,
+    decorrelation_epochs=200,
+    decor_n_train_step_per_epoch=500,
+    policy_n_epochs=100,
+    policy_n_train_step_per_epoch=500,
+    latent_dim=2.0,
+    dis_dropout=False,
 
     rep=REP.get_default_config(),
+    bc=BC.get_default_config(),
     cql=REPCQL.get_default_config(),
     logging=WandBLogger.get_default_config(),
 )
@@ -87,8 +96,11 @@ def main(argv):
 
     observation_dim = eval_sampler.env.observation_space.shape[0]
     action_dim = eval_sampler.env.action_space.shape[0]
-    latent_action_dim = 2 * action_dim
+    latent_action_dim = int(FLAGS.latent_dim * action_dim)
 
+    """
+    Decorrelation Training
+    """
 
     encoder = ActionRepresentationPolicy(
         observation_dim,
@@ -99,13 +111,14 @@ def main(argv):
         FLAGS.encoder_no_tanh,
         FLAGS.policy_log_std_multiplier,
         FLAGS.policy_log_std_offset,
-        FLAGS.action_scale,
+        # FLAGS.action_scale,
         )
 
     discriminator = Discriminator(
         observation_dim, 
         latent_action_dim,
         FLAGS.discriminator_arch,
+        FLAGS.dis_dropout,
     )
 
     decoder = ActionDecoder(
@@ -131,18 +144,48 @@ def main(argv):
         logger.record_dict(metrics)
         logger.dump_tabular(with_prefix=False, with_timestamp=False)
 
-    
+    """
+    BC Training
+    """
+    logger_policy = TanhGaussianPolicy(
+        observation_dim, 
+        action_dim, 
+        FLAGS.policy_arch,
+        FLAGS.orthogonal_init,
+        FLAGS.policy_log_std_multiplier,
+        FLAGS.policy_log_std_offset,
+    )
 
+    bc_agent = BC(FLAGS.bc, logger_policy)
+
+    viskit_metrics = {}
+    for epoch in range(FLAGS.policy_n_epochs):
+        metrics = {'epoch': epoch}
+
+        with Timer() as train_timer:
+            for batch_idx in range(FLAGS.policy_n_train_step_per_epoch):
+                batch = batch_to_jax(subsample_batch(dataset, FLAGS.batch_size))
+                metrics.update(prefix_metrics(bc_agent.train(batch), 'bc'))
+
+        wandb_logger.log(metrics)
+        viskit_metrics.update(metrics)
+        logger.record_dict(metrics)
+        logger.dump_tabular(with_prefix=False, with_timestamp=False)
+        
+    """
+    RL Training (SAC)
+    """
     policy = TanhGaussianPolicy(
         observation_dim, latent_action_dim, FLAGS.policy_arch, FLAGS.orthogonal_init,
-        FLAGS.policy_log_std_multiplier, FLAGS.policy_log_std_offset
+        FLAGS.policy_log_std_multiplier, FLAGS.policy_log_std_offset, FLAGS.action_scale
     )
+
     qf = FullyConnectedQFunction(observation_dim, action_dim, FLAGS.qf_arch, FLAGS.orthogonal_init)
 
     if FLAGS.cql.target_entropy >= 0.0:
         FLAGS.cql.target_entropy = -np.prod(eval_sampler.env.action_space.shape).item()
 
-    repcql = REPCQL(FLAGS.cql, policy, qf, rep)
+    repcql = REPCQL(FLAGS.cql, policy, qf, rep, bc_agent)
     sampler_policy = SamplerPolicy(repcql.policy, repcql.train_params['policy'])
     sampler_decoder = SamplerDecoder(rep.decoder, rep.train_params['decoder'])
 

@@ -36,6 +36,7 @@ class BC(object):
     def __init__(self, config, policy):
         self.config = self.get_default_config(config)
         self.policy = policy
+        self.observation_dim = policy.observation_dim
 
         self._train_states = {}
 
@@ -98,7 +99,7 @@ class BC(object):
             rng, split_rng = jax.random.split(rng)
             log_probs = self.policy.apply(train_params['policy'], observations, actions, method=self.policy.log_prob)
             policy_loss = (alpha*log_pi - log_probs).mean()
-            loss_collection['policy_loss'] = policy_loss
+            loss_collection['policy'] = policy_loss
             negative_log_probs = -log_probs.mean()
 
             return tuple(loss_collection[key] for key in self.model_keys), locals()
@@ -119,6 +120,13 @@ class BC(object):
         )
 
         return new_train_states, metrics
+
+
+    def log_likelihood(self, observations, actions):
+        actions = jnp.clip(actions, -1 + 1e-5, 1 - 1e-5)
+        log_prob = self.policy.apply(self.train_params['policy'], observations, actions, method=self.policy.log_prob)
+        return -log_prob.mean()
+
 
     @property
     def model_keys(self):

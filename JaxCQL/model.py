@@ -118,6 +118,7 @@ class TanhGaussianPolicy(nn.Module):
     orthogonal_init: bool = False
     log_std_multiplier: float = 1.0
     log_std_offset: float = -1.0
+    action_scale: float = 1.0
 
     def setup(self):
         self.base_network = FullyConnectedNetwork(
@@ -137,7 +138,7 @@ class TanhGaussianPolicy(nn.Module):
             distrax.MultivariateNormalDiag(mean, jnp.exp(log_std)),
             distrax.Block(distrax.Tanh(), ndims=1)
         )
-        return action_distribution.log_prob(actions)
+        return action_distribution.log_prob(actions / self.action_scale)
 
     def __call__(self, rng, observations, deterministic=False, repeat=None):
         if repeat is not None:
@@ -155,7 +156,7 @@ class TanhGaussianPolicy(nn.Module):
             log_prob = action_distribution.log_prob(samples)
         else:
             samples, log_prob = action_distribution.sample_and_log_prob(seed=rng)
-
+        samples = samples * self.action_scale
         return samples, log_prob
 
 
@@ -168,7 +169,7 @@ class ActionRepresentationPolicy(nn.Module):
     no_tanh: bool = False
     log_std_multiplier: float = 1.0
     log_std_offset: float = -1.0
-    action_scale: float = 1.0
+    # action_scale: float = 1.0
 
     def setup(self):
         self.base_network = FullyConnectedNetwork(
@@ -192,7 +193,8 @@ class ActionRepresentationPolicy(nn.Module):
                 distrax.MultivariateNormalDiag(mean, jnp.exp(log_std)),
                 distrax.Block(distrax.Tanh(), ndims=1)
             )
-        return action_distribution.log_prob(latent_actions / self.action_scale)
+        # return action_distribution.log_prob(latent_actions / self.action_scale)
+        return action_distribution.log_prob(latent_actions)
 
     def __call__(self, rng, observations, actions, deterministic=False, repeat=None):
         if repeat is not None:
@@ -215,8 +217,32 @@ class ActionRepresentationPolicy(nn.Module):
         else:
             samples, log_prob = action_distribution.sample_and_log_prob(seed=rng)
 
-        samples = samples * self.action_scale
+        # samples = samples * self.action_scale
         return samples, log_prob
+
+    def get_statistics(self, rng, observations, actions, deterministic=False, repeat=None):
+        if repeat is not None:
+            observations = extend_and_repeat(observations, 1, repeat)
+        x = jnp.concatenate([observations, actions], axis=-1)
+        base_network_output = self.base_network(x)
+        mean, log_std = jnp.split(base_network_output, 2, axis=-1)
+        log_std = self.log_std_multiplier_module() * log_std + self.log_std_offset_module()
+        log_std = jnp.clip(log_std, -20.0, 2.0)
+        if self.no_tanh:
+            action_distribution = distrax.MultivariateNormalDiag(mean, jnp.exp(log_std))
+        else:
+            action_distribution = distrax.Transformed(
+                distrax.MultivariateNormalDiag(mean, jnp.exp(log_std)),
+                distrax.Block(distrax.Tanh(), ndims=1)
+            )
+        if deterministic:
+            samples = jnp.tanh(mean)
+            log_prob = action_distribution.log_prob(samples)
+        else:
+            samples, log_prob = action_distribution.sample_and_log_prob(seed=rng)
+
+        # samples = samples * self.action_scale
+        return samples, mean, log_std
 
 
 class ActionDecoder(nn.Module):
@@ -265,14 +291,17 @@ class Discriminator(nn.Module):
     observation_dim: int
     latent_action_dim: int
     arch: str = '512-256'
+    dropout: bool = True
 
     @nn.compact
-    def __call__(self, observations, latent_actions):
+    def __call__(self, observations, latent_actions, train=False):
         x = jnp.concatenate([observations, latent_actions], axis=-1)
         hidden_sizes = [int(h) for h in self.arch.split('-')]
         for h in hidden_sizes:
             x = nn.Dense(h)(x)
             x = nn.leaky_relu(x, 0.2)
+            if self.dropout:
+                x = nn.Dropout(0.5)(x, deterministic=not train)
         output = nn.Dense(1)(x)
         return output
 
