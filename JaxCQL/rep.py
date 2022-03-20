@@ -1,9 +1,9 @@
 from collections import OrderedDict
 from copy import deepcopy
 from functools import partial
-
+import os
 from ml_collections import ConfigDict
-
+import cloudpickle as pickle
 import numpy as np
 import jax
 import jax.numpy as jnp
@@ -12,6 +12,7 @@ import flax.linen as nn
 from flax.training.train_state import TrainState
 import optax
 import distrax
+import copy
 
 from .jax_utils import next_rng, value_and_multi_grad, mse_loss
 from .model import Scalar, update_target_network
@@ -32,6 +33,7 @@ class REP(object):
         config.recon_alpha = 0.05
         config.prior = 'uniform'
         config.smooth_dis = False
+        config.smooth_decoder = True
         config.latent_stats_logging = True
 
         if updates is not None:
@@ -85,13 +87,19 @@ class REP(object):
     def train(self, batch):
         self._total_steps += 1
         self._train_states, metrics = self._train_step(
-            self._train_states, next_rng(), batch
+            self._train_states, next_rng(), batch, True
+        )
+        return metrics
+
+    def val(self, batch):
+        _, metrics = self._train_step(
+            self._train_states, next_rng(), batch, False
         )
         return metrics
 
         
-    @partial(jax.jit, static_argnames=('self'))
-    def _train_step(self, train_states, rng, batch):
+    @partial(jax.jit, static_argnames=('self', 'train'))
+    def _train_step(self, train_states, rng, batch, train=True):
 
         def loss_fn(train_params, rng):
             observations = batch['observations']
@@ -119,10 +127,15 @@ class REP(object):
             rep_loss = g_loss + self.config.recon_alpha * reconstruct_loss
             loss_collection['encoder'] = rep_loss
 
-            loss_collection['decoder'] = reconstruct_loss
-            # latent_actions, _ = self.encoder.apply(train_params['encoder'], split_rng, observations, actions)
-            # reconstruct_loss_cp = mse_loss(self.decoder.apply(train_params['decoder'], observations, latent_actions), actions)
-            # loss_collection['decoder'] = reconstruct_loss_cp
+            if self.config.smooth_decoder:
+                rng, split_rng = jax.random.split(rng)
+                noise = jax.random.normal(split_rng, jnp.shape(latent_actions)) * 0.2
+                perturbed_latent_actions = latent_actions + noise
+                perturbed_reconstruct_loss = mse_loss(self.decoder.apply(train_params['decoder'], observations, perturbed_latent_actions), actions)
+            else:
+                perturbed_reconstruct_loss = reconstruct_loss
+            loss_collection['decoder'] = perturbed_reconstruct_loss
+
 
             if self.config.smooth_dis:
                 rng, split_rng = jax.random.split(rng)
@@ -145,15 +158,25 @@ class REP(object):
             loss_collection['discriminator'] = d_loss
 
             ### Accuracy ###
-            real_pred1 = jax.lax.stop_gradient(
-                self.discriminator.apply(train_params['discriminator'], observations, marginals)
-             ) >= 0.5
+            real_result = jax.lax.stop_gradient(self.discriminator.apply(train_params['discriminator'], observations, marginals))
+            real_pred1 = real_result >= 0.5
             real_accuracy = jnp.mean(real_pred1 * 1.0)
+            real_pred_mean = jnp.mean(real_result)
+            real_pred_max = jnp.max(real_result)
+            real_pred_min = jnp.min(real_result)
+            real_pred_std = jnp.std(real_result)
+            real_pred_median = jnp.median(real_result)
 
-            fake_pred1 = jax.lax.stop_gradient(
+            fake_result = jax.lax.stop_gradient(
                 self.discriminator.apply(train_params['discriminator'], observations, latent_actions_cp)
-             ) <= 0.5
+             ) 
+            fake_pred1 = fake_result <= 0.5
             fake_accuracy = jnp.mean(fake_pred1 * 1.0)
+            fake_pred_mean = jnp.mean(fake_result)
+            fake_pred_max = jnp.max(fake_result)
+            fake_pred_min = jnp.min(fake_result)
+            fake_pred_std = jnp.std(fake_result)
+            fake_pred_median = jnp.median(fake_result)
 
             ### latent action statistics ###
             if self.config.latent_stats_logging:
@@ -174,17 +197,32 @@ class REP(object):
         train_params = {key: train_states[key].params for key in self.model_keys}
         (_, aux_values), grads = value_and_multi_grad(loss_fn, len(self.model_keys), has_aux=True)(train_params, rng)
 
-        new_train_states = {
-            key: train_states[key].apply_gradients(grads=grads[i][key])
-            for i, key in enumerate(self.model_keys)
-        }
+        if train:
+            new_train_states = {
+                key: train_states[key].apply_gradients(grads=grads[i][key])
+                for i, key in enumerate(self.model_keys)
+            }
+        else:
+            new_train_states = copy.deepcopy(train_states)
 
         metrics = dict(
+            g_loss=aux_values['g_loss'],
             encoder_loss=aux_values['rep_loss'],
             decoder_loss=aux_values['reconstruct_loss'],
+            perturbed_decoder_loss=aux_values['perturbed_reconstruct_loss'],
             discriminator_loss=aux_values['d_loss'],
             real_accuracy=aux_values['real_accuracy'],
             fake_accuracy=aux_values['fake_accuracy'],
+            real_pred_mean=aux_values['real_pred_mean'],
+            fake_pred_mean=aux_values['fake_pred_mean'],
+            real_pred_min=aux_values['real_pred_min'],
+            fake_pred_min=aux_values['fake_pred_min'],
+            real_pred_max=aux_values['real_pred_max'],
+            fake_pred_max=aux_values['fake_pred_max'],
+            real_pred_std=aux_values['real_pred_std'],
+            fake_pred_std=aux_values['fake_pred_std'],
+            real_pred_median=aux_values['real_pred_median'],
+            fake_pred_median=aux_values['fake_pred_median'],
         )
 
         if self.config.latent_stats_logging:
@@ -202,6 +240,8 @@ class REP(object):
             ), 'latent_actions'))
 
         return new_train_states, metrics
+
+
 
     @property
     def model_keys(self):

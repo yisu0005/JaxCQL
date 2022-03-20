@@ -1,3 +1,4 @@
+from collections import defaultdict
 from copy import copy, deepcopy
 from queue import Queue
 import threading
@@ -155,3 +156,33 @@ def split_data_by_traj(data, max_traj_length):
         splits.append(index_batch(data, slice(start, None)))
 
     return splits
+
+
+def get_top_dataset(data, filter_success=True, percentile=70.0, max_traj_length=1000):
+    trajs = split_data_by_traj(data, max_traj_length)
+    if filter_success:
+        max_episode_return = np.max([traj['rewards'][-1] for traj in trajs])
+        top_trajs = [traj for traj in trajs if traj['rewards'][-1] == max_episode_return]
+    else:
+        def compute_return(traj):
+            episode_return = traj['rewards'][-1]
+            return episode_return
+        
+        trajs.sort(key=compute_return)
+        N = int(len(trajs) * percentile / 100)
+        N = max(1, N)
+        top_trajs = trajs[-N:]
+    
+    top_dataset = defaultdict(list)
+    for traj in top_trajs:
+        for key, val in traj.items():
+            top_dataset[key].append(val)
+
+    return dict(
+        observations=np.concatenate(top_dataset['observations']),
+        actions=np.concatenate(top_dataset['actions']),
+        next_observations=np.concatenate(top_dataset['next_observations']),
+        rewards=np.concatenate(top_dataset['rewards']),
+        dones=np.concatenate(top_dataset['dones']).astype(np.float32),
+    )
+

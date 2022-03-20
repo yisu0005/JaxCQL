@@ -39,12 +39,15 @@ class REPCQL(object):
         config.cql_target_action_gap = 1.0
         config.cql_temp = 1.0
         config.cql_min_q_weight = 0.0
-        config.cql_max_target_backup = False
+        config.cql_max_target_backup = True 
         config.cql_clip_diff_min = -np.inf
         config.cql_clip_diff_max = np.inf
         config.epsilon = 1e-4
         config.original_q = True
         config.distance_logging = True
+        config.q_value_clip_min = -np.inf
+        config.q_value_clip_max = np.inf
+        config.deterministic_action=False
 
         if updates is not None:
             config.update(ConfigDict(updates).copy_and_resolve_references())
@@ -152,7 +155,7 @@ class REPCQL(object):
             loss_collection = {}
 
             rng, split_rng = jax.random.split(rng)
-            new_actions_rep, log_pi = self.policy.apply(train_params['policy'], split_rng, observations)
+            new_actions_rep, log_pi = self.policy.apply(train_params['policy'], split_rng, observations, deterministic=self.config.deterministic_action)
             new_actions = self.decoder.apply(self.rep.train_params['decoder'], observations, new_actions_rep)
 
             if self.config.distance_logging:
@@ -188,8 +191,8 @@ class REPCQL(object):
                     )
                 else:
                     q_new_actions = jnp.minimum(
-                        self.qf.apply(train_params['qf1'],observations, new_actions_rep),
-                        self.qf.apply(train_params['qf2'],observations, new_actions_rep),
+                        self.qf.apply(train_params['qf1'], observations, new_actions_rep),
+                        self.qf.apply(train_params['qf2'], observations, new_actions_rep),
                     )
 
             policy_loss = (alpha*log_pi - q_new_actions).mean()
@@ -203,7 +206,7 @@ class REPCQL(object):
                 actions_rep, _ = self.encoder.apply(self.rep.train_params['encoder'], split_rng, observations, actions) 
                 actions_rep = jnp.clip(actions_rep, -1 * self.latent_scale + self.config.epsilon, 1 * self.latent_scale - self.config.epsilon)
                 q1_pred = self.qf.apply(train_params['qf1'],observations, actions_rep)
-                q2_pred = self.qf.apply(train_params['qf1'],observations, actions_rep)
+                q2_pred = self.qf.apply(train_params['qf2'],observations, actions_rep)
 
 
             rng, split_rng = jax.random.split(rng)
@@ -233,7 +236,7 @@ class REPCQL(object):
             else:
                 if original_q:
                     new_next_actions_rep, next_log_pi = self.policy.apply(
-                        train_params['policy'], split_rng, next_observations
+                        train_params['policy'], split_rng, next_observations, deterministic=self.config.deterministic_action,
                     )
                     new_next_actions = self.decoder.apply(self.rep.train_params['decoder'], next_observations, new_next_actions_rep)
                     target_q_values = jnp.minimum(
@@ -242,14 +245,18 @@ class REPCQL(object):
                     )
                 else:
                     new_next_actions_rep, next_log_pi = self.policy.apply(
-                        train_params['policy'], split_rng, next_observations
+                        train_params['policy'], split_rng, next_observations, deterministic=self.config.deterministic_action,
                     )
                     target_q_values = jnp.minimum(
                         self.qf.apply(target_qf_params['qf1'], next_observations, new_next_actions_rep),
                         self.qf.apply(target_qf_params['qf2'], next_observations, new_next_actions_rep),
                     )
 
-
+            target_q_values = jnp.clip(
+                target_q_values,
+                self.config.q_value_clip_min,
+                self.config.q_value_clip_max,
+            )
             if self.config.backup_entropy:
                 target_q_values = target_q_values - alpha * next_log_pi
 

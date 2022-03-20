@@ -152,6 +152,7 @@ class TanhGaussianPolicy(nn.Module):
             distrax.Block(distrax.Tanh(), ndims=1)
         )
         if deterministic:
+            mean = jnp.clip(mean, -6, 6)
             samples = jnp.tanh(mean)
             log_prob = action_distribution.log_prob(samples)
         else:
@@ -331,6 +332,9 @@ class SamplerDecoder(object):
         self.decoder = decoder
         self.params = params
 
+    def update_params(self, params):
+        self.params = params
+        return self
 
     @partial(jax.jit, static_argnames=('self'))
     def act(self, params, observations, actions_rep):
@@ -338,5 +342,24 @@ class SamplerDecoder(object):
 
     def __call__(self, observations, actions_rep):
         actions = self.act(self.params, observations, actions_rep)
+        assert jnp.all(jnp.isfinite(actions))
+        return jax.device_get(actions)
+
+class SamplerEncoder(object):
+
+    def __init__(self, encoder, params):
+        self.encoder = encoder
+        self.params = params
+    
+    def update_params(self, params):
+        self.params = params
+        return self
+
+    @partial(jax.jit, static_argnames=('self'))
+    def act(self, params, rng, observations, actions):
+        return self.encoder.apply(params, rng, observations, actions)[0]
+
+    def __call__(self, rng, observations, actions):
+        actions = self.act(self.params, rng, observations, actions)
         assert jnp.all(jnp.isfinite(actions))
         return jax.device_get(actions)
