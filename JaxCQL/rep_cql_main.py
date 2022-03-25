@@ -19,9 +19,9 @@ import absl.flags
 from .rep_cql import REPCQL
 from .rep import REP
 from .bc_policy import BC
-from .replay_buffer import get_d4rl_dataset, subsample_batch, get_top_dataset
+from .replay_buffer import get_d4rl_dataset, subsample_batch, get_top_dataset, get_sarsa_dataset
 from .jax_utils import batch_to_jax, next_rng
-from .model import TanhGaussianPolicy, FullyConnectedQFunction, SamplerPolicy, SamplerDecoder, SamplerEncoder, Discriminator, ActionDecoder, ActionRepresentationPolicy
+from .model import TanhGaussianPolicy, FullyConnectedQFunction, SamplerPolicy, SamplerDecoder, SamplerEncoder, Discriminator, ActionDecoder, ActionSeperatedDecoder, ActionRepresentationPolicy
 from .sampler import StepSampler, TrajSampler
 from .utils import Timer, define_flags_with_default, set_random_seed, print_flags, get_user_flags, prefix_metrics
 from .utils import WandBLogger, random_split
@@ -55,16 +55,16 @@ FLAGS_DEF = define_flags_with_default(
     eval_n_trajs=10,
     
     train_decorrelation=True,
-    train_bc=True,
+    train_bc=False,
     train_cql=False,
     encoder_no_tanh=True,
+    action_seperate_decoder=True,
     action_scale=1.0,
     discriminator_arch='512-256-128-64',
     encoder_arch='256-256-256',
     decoder_arch='256-256-256',
-    decorrelation_top_data=True,
     decorrelation_method='GAN',
-    decorrelation_epochs=400, #500
+    decorrelation_epochs=50, 
     decor_n_train_step_per_epoch=1000,
     policy_n_epochs=100,
     policy_n_train_step_per_epoch=500,
@@ -112,8 +112,14 @@ def main(argv):
     action_dim = eval_sampler.env.action_space.shape[0]
     latent_action_dim = int(FLAGS.latent_dim * action_dim)
     print(dataset['actions'].shape)
+    print(dataset['observations'].shape)
+    print(dataset['next_observations'].shape)
 
-    train_dataset, val_dataset = random_split(dataset, 0.9, seed=FLAGS.seed)
+    sarsa_dataset = get_sarsa_dataset(dataset)
+
+
+
+    train_dataset, val_dataset = random_split(sarsa_dataset, 0.9, seed=FLAGS.seed)
 
     """
     Decorrelation Training
@@ -138,13 +144,23 @@ def main(argv):
         FLAGS.dis_dropout,
     )
 
-    decoder = ActionDecoder(
-       observation_dim,
-       latent_action_dim,
-       action_dim,
-       FLAGS.decoder_arch, 
-       FLAGS.orthogonal_init, 
-    )
+    if FLAGS.action_seperate_decoder:
+        decoder = ActionSeperatedDecoder(
+        observation_dim,
+        latent_action_dim,
+        action_dim,
+        FLAGS.decoder_arch, 
+        FLAGS.orthogonal_init, 
+        )
+    else:
+        decoder = ActionDecoder(
+        observation_dim,
+        latent_action_dim,
+        action_dim,
+        FLAGS.decoder_arch, 
+        FLAGS.orthogonal_init, 
+        )
+
     rep = REP(FLAGS.rep, encoder, discriminator, decoder, method=FLAGS.decorrelation_method)
 
     if FLAGS.train_decorrelation:
@@ -154,19 +170,14 @@ def main(argv):
 
             with Timer() as train_timer:
                 for batch_idx in range(FLAGS.decor_n_train_step_per_epoch):
-                    if FLAGS.decorrelation_top_data:
-                        batch = batch_to_jax(subsample_batch(top_dataset, FLAGS.rep_batch_size))
-                    else:
-                        batch = batch_to_jax(subsample_batch(dataset, FLAGS.rep_batch_size))
-
+                    batch = batch_to_jax(subsample_batch(train_dataset, FLAGS.rep_batch_size))
                     metrics.update(prefix_metrics(rep.train(batch), 'decorrelation'))
             
-            if not FLAGS.decorrelation_top_data:
-                with Timer() as eval_timer:
-                    if epoch == 0 or (epoch + 1) % 10 == 0:
-                        for batch_idx in range(FLAGS.decor_n_train_step_per_epoch):
-                            batch = batch_to_jax(subsample_batch(top_dataset, FLAGS.rep_batch_size))
-                            metrics.update(prefix_metrics(rep.val(batch), 'decorrelation_top_eval'))
+            with Timer() as eval_timer:
+                if epoch == 0 or (epoch + 1) % 10 == 0:
+                    for batch_idx in range(FLAGS.decor_n_train_step_per_epoch):
+                        batch = batch_to_jax(subsample_batch(val_dataset, FLAGS.rep_batch_size))
+                        metrics.update(prefix_metrics(rep.val(batch), 'decorrelation_validation'))
             
             wandb_logger.log(metrics)
             viskit_metrics.update(metrics)

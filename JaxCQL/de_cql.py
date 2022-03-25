@@ -456,10 +456,9 @@ class DECQL(object):
             loss_collection['encoder'] = encoder_loss
 
             if original_q:
-                decoder_loss = policy_loss + self.config.alpha    
-
-
-                b .                               
+                decoder_loss = policy_loss + self.config.alpha * reconstruct_loss
+            else:
+                decoder_loss = self.config.alpha * reconstruct_loss           
             loss_collection['decoder'] = reconstruct_loss
 
 

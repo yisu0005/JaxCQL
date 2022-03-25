@@ -158,6 +158,12 @@ class REPCQL(object):
             new_actions_rep, log_pi = self.policy.apply(train_params['policy'], split_rng, observations, deterministic=self.config.deterministic_action)
             new_actions = self.decoder.apply(self.rep.train_params['decoder'], observations, new_actions_rep)
 
+            train_action_l2 = jnp.mean(jnp.linalg.norm(new_actions - actions, axis=-1))
+            rng, split_rng = jax.random.split(rng)
+            new_actions_decoded, _ = self.encoder.apply(self.rep.train_params['encoder'], split_rng, observations, new_actions)
+            decoded_action_l2 = jnp.mean(jnp.linalg.norm(new_actions_rep - new_actions_decoded, axis=-1)) 
+
+
             if self.config.distance_logging:
                 latent_dis_accuracy = self.discriminator.apply(self.rep.train_params['discriminator'], observations, new_actions_rep).mean()
                 bc_log_prob = self.bc_agent.log_likelihood(observations, actions)
@@ -415,6 +421,8 @@ class REPCQL(object):
             average_qf1=aux_values['q1_pred'].mean(),
             average_qf2=aux_values['q2_pred'].mean(),
             average_target_q=aux_values['target_q_values'].mean(),
+            train_action_l2=aux_values['train_action_l2'].mean(),
+            decoded_action_l2=aux_values['decoded_action_l2'].mean(),
         )
 
         if self.config.use_cql:
