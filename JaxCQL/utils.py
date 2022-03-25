@@ -177,3 +177,17 @@ def prefix_metrics(metrics, prefix):
     return {
         '{}/{}'.format(prefix, key): value for key, value in metrics.items()
     }
+
+
+def random_split(dataset, train_proportion, seed):
+    np.random.seed(seed)
+    sample_size = np.shape(dataset['rewards'])[0]
+    train_size = int(train_proportion * sample_size)
+    val_size = sample_size - train_size
+
+    indices = np.random.permutation(sample_size)
+    train_dataset, val_dataset = dict(), dict()
+    for key, val in dataset.items():
+        train_dataset[key] = val[indices][:train_size]
+        val_dataset[key] = val[indices][train_size:]
+    return train_dataset, val_dataset

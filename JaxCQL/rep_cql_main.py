@@ -24,7 +24,7 @@ from .jax_utils import batch_to_jax, next_rng
 from .model import TanhGaussianPolicy, FullyConnectedQFunction, SamplerPolicy, SamplerDecoder, SamplerEncoder, Discriminator, ActionDecoder, ActionRepresentationPolicy
 from .sampler import StepSampler, TrajSampler
 from .utils import Timer, define_flags_with_default, set_random_seed, print_flags, get_user_flags, prefix_metrics
-from .utils import WandBLogger
+from .utils import WandBLogger, random_split
 from viskit.logging import logger, setup_logger
 
 
@@ -112,6 +112,8 @@ def main(argv):
     action_dim = eval_sampler.env.action_space.shape[0]
     latent_action_dim = int(FLAGS.latent_dim * action_dim)
     print(dataset['actions'].shape)
+
+    train_dataset, val_dataset = random_split(dataset, 0.9, seed=FLAGS.seed)
 
     """
     Decorrelation Training

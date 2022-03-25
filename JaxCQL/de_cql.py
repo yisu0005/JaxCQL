@@ -36,7 +36,7 @@ class DECQL(object):
         config.dis_lr = 3e-4
         config.recon_alpha = 0.01
         config.alpha = 100.0
-        config.optimizer_b1 = 0.5
+        config.optimizer_b1 = 0.9
         config.optimizer_b2 = 0.999
         config.optimizer_type = 'adam'
         config.soft_target_update_rate = 5e-3
@@ -450,10 +450,16 @@ class DECQL(object):
             rep_loss = g_loss + self.config.recon_alpha * reconstruct_loss
 
             if original_q:
-                encoder_loss = policy_loss + self.config.alpha * rep_loss 
+                encoder_loss = self.config.alpha * rep_loss 
             else:
                 encoder_loss = (qf1_loss + qf2_loss) / 2.0 + self.config.alpha * rep_loss 
             loss_collection['encoder'] = encoder_loss
+
+            if original_q:
+                decoder_loss = policy_loss + self.config.alpha    
+
+
+                b .                               
             loss_collection['decoder'] = reconstruct_loss
 
 
@@ -560,7 +566,7 @@ class DECQL(object):
                 real_pred_median=aux_values['real_pred_median'],
                 fake_pred_median=aux_values['fake_pred_median'],
             ), 'decorrelation')) 
-            
+
         if self.config.latent_stats_logging:
             metrics.update(prefix_metrics(dict(
                 latent_ac_max=aux_values['latent_ac_max'],

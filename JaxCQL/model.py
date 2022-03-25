@@ -288,6 +288,48 @@ class ActionDecoder(nn.Module):
         return output
 
 
+class ActionSeperatedDecoder(nn.Module):
+    observation_dim: int
+    latent_action_dim: int
+    action_dim: int
+    arch: str = '256-256'
+    orthogonal_init: bool = False
+
+    @nn.compact
+    @multiple_action_decode_function
+    def __call__(self, observations, latent_actions):
+        x = observations
+        hidden_sizes = [int(h) for h in self.arch.split('-')]
+        for h in hidden_sizes:
+            if self.orthogonal_init:
+                x = nn.Dense(
+                    h,
+                    kernel_init=jax.nn.initializers.orthogonal(jnp.sqrt(2.0)),
+                    bias_init=jax.nn.initializers.zeros
+                )(jnp.concatenate([x, latent_actions], axis=-1))
+            else:
+                x = nn.Dense(h)(jnp.concatenate([x, latent_actions], axis=-1))
+            x = nn.relu(x)
+
+        if self.orthogonal_init:
+            x = nn.Dense(
+                self.action_dim,
+                kernel_init=jax.nn.initializers.orthogonal(1e-2),
+                bias_init=jax.nn.initializers.zeros
+            )(jnp.concatenate([x, latent_actions], axis=-1))
+        else:
+            x = nn.Dense(
+                self.action_dim,
+                kernel_init=jax.nn.initializers.variance_scaling(
+                    1e-2, 'fan_in', 'uniform'
+                ),
+                bias_init=jax.nn.initializers.zeros
+            )(jnp.concatenate([x, latent_actions], axis=-1))
+        
+        output = nn.tanh(x)
+        return output
+
+
 class Discriminator(nn.Module):
     observation_dim: int
     latent_action_dim: int
