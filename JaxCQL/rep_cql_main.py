@@ -60,11 +60,11 @@ FLAGS_DEF = define_flags_with_default(
     encoder_no_tanh=True,
     action_seperate_decoder=True,
     action_scale=1.0,
-    discriminator_arch='512-256-128-64',
-    encoder_arch='256-256-256',
-    decoder_arch='256-256-256',
+    discriminator_arch='256-256-256-256',
+    encoder_arch='256-256-256-256',
+    decoder_arch='256-256-256-256',
     decorrelation_method='GAN',
-    decorrelation_epochs=50, 
+    decorrelation_epochs=500, 
     decor_n_train_step_per_epoch=1000,
     policy_n_epochs=100,
     policy_n_train_step_per_epoch=500,
@@ -111,11 +111,8 @@ def main(argv):
     observation_dim = eval_sampler.env.observation_space.shape[0]
     action_dim = eval_sampler.env.action_space.shape[0]
     latent_action_dim = int(FLAGS.latent_dim * action_dim)
-    print(dataset['actions'].shape)
-    print(dataset['observations'].shape)
-    print(dataset['next_observations'].shape)
 
-    sarsa_dataset = get_sarsa_dataset(dataset)
+    sarsa_dataset = get_sarsa_dataset(eval_sampler.env)
 
 
 
@@ -161,7 +158,9 @@ def main(argv):
         FLAGS.orthogonal_init, 
         )
 
-    rep = REP(FLAGS.rep, encoder, discriminator, decoder, method=FLAGS.decorrelation_method)
+    rep_qf = FullyConnectedQFunction(observation_dim, action_dim, FLAGS.qf_arch, FLAGS.orthogonal_init)
+
+    rep = REP(FLAGS.rep, encoder, discriminator, decoder, rep_qf, method=FLAGS.decorrelation_method)
 
     if FLAGS.train_decorrelation:
         viskit_metrics = {}

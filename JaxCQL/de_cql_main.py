@@ -62,9 +62,9 @@ FLAGS_DEF = define_flags_with_default(
     decoder_arch='256-256-256',
     decorrelation_top_data=False,
     decorrelation_method='GAN',
-    decorrelation_epochs=50, #500
+    decorrelation_epochs=40, #500
     decor_n_train_step_per_epoch=1000,
-    policy_n_epochs=100,
+    policy_n_epochs=10,
     policy_n_train_step_per_epoch=500,
     latent_dim=2.0,
     dis_dropout=False,
@@ -108,7 +108,6 @@ def main(argv):
     observation_dim = eval_sampler.env.observation_space.shape[0]
     action_dim = eval_sampler.env.action_space.shape[0]
     latent_action_dim = int(FLAGS.latent_dim * action_dim)
-    print(dataset['actions'].shape)
 
     """
     Decorrelation Training

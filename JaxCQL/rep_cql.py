@@ -45,9 +45,9 @@ class REPCQL(object):
         config.epsilon = 1e-4
         config.original_q = True
         config.distance_logging = True
-        config.q_value_clip_min = -np.inf
-        config.q_value_clip_max = np.inf
-        config.deterministic_action=False
+        config.q_value_clip_min = -1000.0
+        config.q_value_clip_max = 1000.0
+        config.deterministic_action= False
 
         if updates is not None:
             config.update(ConfigDict(updates).copy_and_resolve_references())
@@ -214,6 +214,16 @@ class REPCQL(object):
                 q1_pred = self.qf.apply(train_params['qf1'],observations, actions_rep)
                 q2_pred = self.qf.apply(train_params['qf2'],observations, actions_rep)
 
+            q1_pred = jnp.clip(
+                q1_pred,
+                self.config.q_value_clip_min,
+                self.config.q_value_clip_max,
+            )
+            q2_pred = jnp.clip(
+                q2_pred,
+                self.config.q_value_clip_min,
+                self.config.q_value_clip_max,
+            )
 
             rng, split_rng = jax.random.split(rng)
             if self.config.cql_max_target_backup:
@@ -467,3 +477,5 @@ class REPCQL(object):
     @property
     def total_steps(self):
         return self._total_steps
+
+ 

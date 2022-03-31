@@ -158,20 +158,50 @@ def split_data_by_traj(data, max_traj_length):
     return splits
 
 
-def get_sarsa_dataset(data, max_traj_length=1000):
-    trajs = split_data_by_traj(data, max_traj_length)
+# def get_sarsa_dataset(data, max_traj_length=1000):
+#     trajs = split_data_by_traj(data, max_traj_length)
+#     observations = []
+#     actions = []
+#     next_observations = []
+#     next_actions = []
+#     rewards = []
+
+#     for traj in trajs:
+#         observations.append(traj['observations'][:-1])
+#         actions.append(traj['actions'][:-1])
+#         next_observations.append(traj['next_observations'][:-1])
+#         next_actions.append(traj['actions'][1:])
+#         rewards.append(traj['rewards'][:-1])
+    
+#     return dict(
+#         observations=np.concatenate(observations),
+#         actions=np.concatenate(actions),
+#         next_observations=np.concatenate(next_observations),
+#         rewards=np.concatenate(rewards),
+#         next_actions=np.concatenate(next_actions),
+#     )
+
+def get_sarsa_dataset(env):
+    dataset = env.get_dataset()
+    dataset_cp = dict()
+    for key in ['next_observations', 'observations', 'rewards', 'terminals', 'timeouts', 'actions']:
+        dataset_cp[key] = dataset[key]
+    dataset = dataset_cp
+
+    dataset = d4rl.sequence_dataset(env, dataset)
     observations = []
     actions = []
     next_observations = []
     next_actions = []
     rewards = []
-
-    for traj in trajs:
+    dones = []
+    for traj in dataset:
         observations.append(traj['observations'][:-1])
         actions.append(traj['actions'][:-1])
         next_observations.append(traj['next_observations'][:-1])
         next_actions.append(traj['actions'][1:])
         rewards.append(traj['rewards'][:-1])
+        dones.append(traj['terminals'][:-1].astype(np.float32))
     
     return dict(
         observations=np.concatenate(observations),
@@ -179,9 +209,10 @@ def get_sarsa_dataset(data, max_traj_length=1000):
         next_observations=np.concatenate(next_observations),
         rewards=np.concatenate(rewards),
         next_actions=np.concatenate(next_actions),
+        dones=np.concatenate(dones),
     )
 
-
+    
 
 
 def get_top_dataset(data, filter_success=True, percentile=70.0, max_traj_length=1000):

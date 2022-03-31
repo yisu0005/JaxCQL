@@ -25,9 +25,12 @@ class DECQL(object):
         config = ConfigDict()
         config.discount = 0.99
         config.alpha_multiplier = 1.0
+        config.gloss_alpha_multiplier = 1.0
         config.use_automatic_entropy_tuning = True
+        config.use_automatic_gloss_tuning = False
         config.backup_entropy = False
         config.target_entropy = 0.0
+        config.target_gloss = 0.6
         config.policy_lr = 3e-4
         config.qf_lr = 3e-4
         config.prior = 'uniform'
@@ -35,7 +38,7 @@ class DECQL(object):
         config.decoder_lr = 3e-4
         config.dis_lr = 3e-4
         config.recon_alpha = 0.01
-        config.alpha = 100.0
+        config.gloss_alpha = 1000.0
         config.optimizer_b1 = 0.9
         config.optimizer_b2 = 0.999
         config.optimizer_type = 'adam'
@@ -51,10 +54,10 @@ class DECQL(object):
         config.cql_clip_diff_min = -np.inf
         config.cql_clip_diff_max = np.inf
         config.epsilon = 1e-4
-        config.original_q = True
+        config.original_q = False
         config.distance_logging = True
-        config.q_value_clip_min = -np.inf
-        config.q_value_clip_max = np.inf
+        config.q_value_clip_min = 0.0
+        config.q_value_clip_max = 300.0
         config.deterministic_action=False
         config.smooth_dis=False
         config.latent_stats_logging=True
@@ -155,6 +158,17 @@ class DECQL(object):
             )
             model_keys.append('log_alpha')
 
+        
+        if self.config.use_automatic_gloss_tuning:
+            self.log_gloss_alpha = Scalar(0.0)
+            self._train_states['log_gloss_alpha'] = TrainState.create(
+                params=self.log_gloss_alpha.init(next_rng()),
+                tx=optimizer_class(self.config.policy_lr),
+                apply_fn=None
+            )
+            model_keys.append('log_gloss_alpha')        
+        
+        
         if self.config.cql_lagrange:
             self.log_alpha_prime = Scalar(1.0)
             self._train_states['log_alpha_prime'] = TrainState.create(
@@ -241,7 +255,18 @@ class DECQL(object):
                 actions_rep = jnp.clip(actions_rep, -1 * self.latent_scale + self.config.epsilon, 1 * self.latent_scale - self.config.epsilon)
                 q1_pred = self.qf.apply(train_params['qf1'],observations, actions_rep)
                 q2_pred = self.qf.apply(train_params['qf2'],observations, actions_rep)
+            
+            q1_pred = jnp.clip(
+                q1_pred,
+                self.config.q_value_clip_min,
+                self.config.q_value_clip_max,
+            )
 
+            q2_pred = jnp.clip(
+                q2_pred,
+                self.config.q_value_clip_min,
+                self.config.q_value_clip_max,
+            )
 
             rng, split_rng = jax.random.split(rng)
             if self.config.cql_max_target_backup:
@@ -449,17 +474,27 @@ class DECQL(object):
             reconstruct_loss = mse_loss(self.decoder.apply(train_params['decoder'], observations, actions_rep), actions)
             rep_loss = g_loss + self.config.recon_alpha * reconstruct_loss
 
-            if original_q:
-                encoder_loss = self.config.alpha * rep_loss 
+            if self.config.use_automatic_gloss_tuning and not decorrelation:
+                gloss_alpha_loss = -self.log_gloss_alpha.apply(train_params['log_gloss_alpha']) * (g_loss - self.config.target_gloss).mean()
+                loss_collection['log_gloss_alpha'] = gloss_alpha_loss
+                gloss_alpha = jnp.exp(self.log_gloss_alpha.apply(train_params['log_gloss_alpha'])) * self.config.gloss_alpha_multiplier
+                gloss_alpha = jnp.clip(gloss_alpha, 0.0, 1000.0)
             else:
-                encoder_loss = (qf1_loss + qf2_loss) / 2.0 + self.config.alpha * rep_loss 
+                gloss_alpha_loss = 0.0
+                loss_collection['log_gloss_alpha'] = gloss_alpha_loss
+                gloss_alpha = self.config.gloss_alpha
+
+            if original_q:
+                encoder_loss = rep_loss 
+            else:
+                encoder_loss = (qf1_loss + qf2_loss) / 2.0 + gloss_alpha * rep_loss 
             loss_collection['encoder'] = encoder_loss
 
             if original_q:
-                decoder_loss = policy_loss + self.config.alpha * reconstruct_loss
+                decoder_loss = policy_loss + self.config.gloss_alpha * reconstruct_loss
             else:
-                decoder_loss = self.config.alpha * reconstruct_loss           
-            loss_collection['decoder'] = reconstruct_loss
+                decoder_loss = reconstruct_loss           
+            loss_collection['decoder'] = decoder_loss
 
 
             if self.config.smooth_dis:
@@ -541,6 +576,7 @@ class DECQL(object):
             qf2_loss=aux_values['qf2_loss'],
             alpha_loss=aux_values['alpha_loss'],
             alpha=aux_values['alpha'],
+            gloss_alpha=aux_values['gloss_alpha'],
             average_qf1=aux_values['q1_pred'].mean(),
             average_qf2=aux_values['q2_pred'].mean(),
             average_target_q=aux_values['target_q_values'].mean(),
