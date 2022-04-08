@@ -106,6 +106,20 @@ def get_d4rl_dataset(env):
         dones=dataset['terminals'].astype(np.float32),
     )
 
+def get_preprocessed_dataset(env, latent_action_dim):
+    dataset = d4rl.qlearning_dataset(env)
+    sample_size, _ = np.shape(dataset['actions'])
+    latent_actions = np.random.uniform(low=-1, high=1, size=(sample_size, latent_action_dim))
+    # latent_actions = np.zeros((sample_size, 1))
+    return dict(
+        observations=dataset['observations'],
+        actions=dataset['actions'],
+        latent_actions=latent_actions, 
+        next_observations=dataset['next_observations'],
+        rewards=dataset['rewards'],
+        dones=dataset['terminals'].astype(np.float32),
+    )
+
 
 def index_batch(batch, indices):
     indexed = {}

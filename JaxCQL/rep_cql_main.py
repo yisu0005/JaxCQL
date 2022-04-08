@@ -19,9 +19,9 @@ import absl.flags
 from .rep_cql import REPCQL
 from .rep import REP
 from .bc_policy import BC
-from .replay_buffer import get_d4rl_dataset, subsample_batch, get_top_dataset, get_sarsa_dataset
+from .replay_buffer import get_d4rl_dataset, get_preprocessed_dataset, subsample_batch, get_top_dataset, get_sarsa_dataset, get_preprocessed_dataset
 from .jax_utils import batch_to_jax, next_rng
-from .model import TanhGaussianPolicy, FullyConnectedQFunction, SamplerPolicy, SamplerDecoder, SamplerEncoder, Discriminator, ActionDecoder, ActionSeperatedDecoder, ActionRepresentationPolicy
+from .model import TanhGaussianPolicy, FullyConnectedQFunction, FullyConnectedQFunction, SamplerPolicy, SamplerDecoder, SamplerEncoder, Discriminator, ActionDecoder, ActionSeperatedDecoder, ActionRepresentationPolicy
 from .sampler import StepSampler, TrajSampler
 from .utils import Timer, define_flags_with_default, set_random_seed, print_flags, get_user_flags, prefix_metrics
 from .utils import WandBLogger, random_split
@@ -55,18 +55,18 @@ FLAGS_DEF = define_flags_with_default(
     eval_n_trajs=10,
     
     train_decorrelation=True,
-    train_bc=False,
-    train_cql=False,
+    train_bc=True,
+    train_cql=True,
     encoder_no_tanh=True,
     action_seperate_decoder=True,
     action_scale=1.0,
-    discriminator_arch='256-256-256-256',
+    discriminator_arch='256-256-256',
     encoder_arch='256-256-256-256',
-    decoder_arch='256-256-256-256',
+    decoder_arch='256-256-256',
     decorrelation_method='GAN',
-    decorrelation_epochs=500, 
+    decorrelation_epochs=10, 
     decor_n_train_step_per_epoch=1000,
-    policy_n_epochs=100,
+    policy_n_epochs=10,
     policy_n_train_step_per_epoch=500,
     latent_dim=2.0,
     dis_dropout=False,
@@ -99,24 +99,23 @@ def main(argv):
     set_random_seed(FLAGS.seed)
 
     eval_sampler = TrajSampler(gym.make(FLAGS.env).unwrapped, FLAGS.max_traj_length)
-    dataset = get_d4rl_dataset(eval_sampler.env)
-    dataset['rewards'] = dataset['rewards'] * FLAGS.reward_scale + FLAGS.reward_bias
-    dataset['actions'] = np.clip(dataset['actions'], -FLAGS.clip_action, FLAGS.clip_action)
-
-    if FLAGS.bc_filter_success:
-        top_dataset = get_top_dataset(dataset)
-    else:
-        top_dataset = get_top_dataset(dataset, filter_success=False, percentile=FLAGS.bc_filter_percentile)
-
     observation_dim = eval_sampler.env.observation_space.shape[0]
     action_dim = eval_sampler.env.action_space.shape[0]
     latent_action_dim = int(FLAGS.latent_dim * action_dim)
+    
 
-    sarsa_dataset = get_sarsa_dataset(eval_sampler.env)
+    # dataset = get_d4rl_dataset(eval_sampler.env)
+    dataset = get_preprocessed_dataset(eval_sampler.env, latent_action_dim)
+    dataset['rewards'] = dataset['rewards'] * FLAGS.reward_scale + FLAGS.reward_bias
+    dataset['actions'] = np.clip(dataset['actions'], -FLAGS.clip_action, FLAGS.clip_action)
 
+    # if FLAGS.bc_filter_success:
+    #     top_dataset = get_top_dataset(dataset)
+    # else:
+    #     top_dataset = get_top_dataset(dataset, filter_success=False, percentile=FLAGS.bc_filter_percentile)
 
-
-    train_dataset, val_dataset = random_split(sarsa_dataset, 0.9, seed=FLAGS.seed)
+    # sarsa_dataset = get_sarsa_dataset(eval_sampler.env)
+    # train_dataset, val_dataset = random_split(sarsa_dataset, 0.9, seed=FLAGS.seed)
 
     """
     Decorrelation Training
@@ -136,7 +135,8 @@ def main(argv):
 
     discriminator = Discriminator(
         observation_dim, 
-        latent_action_dim,
+        # latent_action_dim,
+        action_dim,
         FLAGS.discriminator_arch,
         FLAGS.dis_dropout,
     )
@@ -158,6 +158,7 @@ def main(argv):
         FLAGS.orthogonal_init, 
         )
 
+
     rep_qf = FullyConnectedQFunction(observation_dim, action_dim, FLAGS.qf_arch, FLAGS.orthogonal_init)
 
     rep = REP(FLAGS.rep, encoder, discriminator, decoder, rep_qf, method=FLAGS.decorrelation_method)
@@ -169,14 +170,14 @@ def main(argv):
 
             with Timer() as train_timer:
                 for batch_idx in range(FLAGS.decor_n_train_step_per_epoch):
-                    batch = batch_to_jax(subsample_batch(train_dataset, FLAGS.rep_batch_size))
+                    batch = batch_to_jax(subsample_batch(dataset, FLAGS.rep_batch_size))
                     metrics.update(prefix_metrics(rep.train(batch), 'decorrelation'))
             
-            with Timer() as eval_timer:
-                if epoch == 0 or (epoch + 1) % 10 == 0:
-                    for batch_idx in range(FLAGS.decor_n_train_step_per_epoch):
-                        batch = batch_to_jax(subsample_batch(val_dataset, FLAGS.rep_batch_size))
-                        metrics.update(prefix_metrics(rep.val(batch), 'decorrelation_validation'))
+            # with Timer() as eval_timer:
+            #     if epoch == 0 or (epoch + 1) % 10 == 0:
+            #         for batch_idx in range(FLAGS.decor_n_train_step_per_epoch):
+            #             batch = batch_to_jax(subsample_batch(val_dataset, FLAGS.rep_batch_size))
+            #             metrics.update(prefix_metrics(rep.val(batch), 'decorrelation_validation'))
             
             wandb_logger.log(metrics)
             viskit_metrics.update(metrics)
@@ -216,7 +217,7 @@ def main(argv):
 
             with Timer() as train_timer:
                 for batch_idx in range(FLAGS.policy_n_train_step_per_epoch):
-                    batch = batch_to_jax(subsample_batch(top_dataset, FLAGS.batch_size))
+                    batch = batch_to_jax(subsample_batch(dataset, FLAGS.batch_size))
                     metrics.update(prefix_metrics(bc_agent.train(batch), 'bc'))
 
             wandb_logger.log(metrics)
@@ -224,56 +225,56 @@ def main(argv):
             logger.record_dict(metrics)
             logger.dump_tabular(with_prefix=False, with_timestamp=False)
 
-    """
-    Disganosis for U(-1,1)
-    """
-    sampler_encoder = SamplerEncoder(rep.encoder, rep.train_params['encoder']) 
-    sampler_decoder = SamplerDecoder(rep.decoder, rep.train_params['decoder'])
-    trajs = eval_sampler.repa_sample(
-                        None,
-                        sampler_decoder, 
-                        FLAGS.eval_n_trajs, deterministic=True,
-                        latent_ac_dim=latent_action_dim,
-                    )
+    # """
+    # Disganosis for U(-1,1)
+    # """
+    # sampler_encoder = SamplerEncoder(rep.encoder, rep.train_params['encoder']) 
+    # sampler_decoder = SamplerDecoder(rep.decoder, rep.train_params['decoder'])
+    # trajs = eval_sampler.repa_sample(
+    #                     None,
+    #                     sampler_decoder, 
+    #                     FLAGS.eval_n_trajs, deterministic=True,
+    #                     latent_ac_dim=latent_action_dim,
+    #                 )
 
-    decoder_metrics = {}
-    decoder_metrics['average_return'] = np.mean([np.sum(t['rewards']) for t in trajs])
-    decoder_metrics['average_traj_length'] = np.mean([len(t['rewards']) for t in trajs])
-    decoder_metrics['average_normalizd_return'] = np.mean(
-        [eval_sampler.env.get_normalized_score(np.sum(t['rewards'])) for t in trajs]
-    )
-    print(decoder_metrics)
+    # decoder_metrics = {}
+    # decoder_metrics['average_return'] = np.mean([np.sum(t['rewards']) for t in trajs])
+    # decoder_metrics['average_traj_length'] = np.mean([len(t['rewards']) for t in trajs])
+    # decoder_metrics['average_normalizd_return'] = np.mean(
+    #     [eval_sampler.env.get_normalized_score(np.sum(t['rewards'])) for t in trajs]
+    # )
+    # print(decoder_metrics)
 
-    """
-    BC
-    """
-    bc_sampler_policy = SamplerPolicy(bc_agent.policy, bc_agent.train_params['policy'])
-    trajs = eval_sampler.sample(
-                        bc_sampler_policy,
-                        FLAGS.eval_n_trajs, deterministic=True,
-                    )
+    # """
+    # BC
+    # """
+    # bc_sampler_policy = SamplerPolicy(bc_agent.policy, bc_agent.train_params['policy'])
+    # trajs = eval_sampler.sample(
+    #                     bc_sampler_policy,
+    #                     FLAGS.eval_n_trajs, deterministic=True,
+    #                 )
 
-    decoder_metrics = {}
-    decoder_metrics['average_return'] = np.mean([np.sum(t['rewards']) for t in trajs])
-    decoder_metrics['average_traj_length'] = np.mean([len(t['rewards']) for t in trajs])
-    decoder_metrics['average_normalizd_return'] = np.mean(
-        [eval_sampler.env.get_normalized_score(np.sum(t['rewards'])) for t in trajs]
-    )
-    print(decoder_metrics)
+    # decoder_metrics = {}
+    # decoder_metrics['average_return'] = np.mean([np.sum(t['rewards']) for t in trajs])
+    # decoder_metrics['average_traj_length'] = np.mean([len(t['rewards']) for t in trajs])
+    # decoder_metrics['average_normalizd_return'] = np.mean(
+    #     [eval_sampler.env.get_normalized_score(np.sum(t['rewards'])) for t in trajs]
+    # )
+    # print(decoder_metrics)
 
-    """
-    Encoded/Decoded BC
-    """
-    trajs = eval_sampler.sample_decoded(
-        next_rng(), bc_sampler_policy, sampler_encoder, sampler_decoder, FLAGS.eval_n_trajs, deterministic=True,
-    )
-    decoder_metrics = {}
-    decoder_metrics['average_return'] = np.mean([np.sum(t['rewards']) for t in trajs])
-    decoder_metrics['average_traj_length'] = np.mean([len(t['rewards']) for t in trajs])
-    decoder_metrics['average_normalizd_return'] = np.mean(
-        [eval_sampler.env.get_normalized_score(np.sum(t['rewards'])) for t in trajs]
-    )
-    print(decoder_metrics)
+    # """
+    # Encoded/Decoded BC
+    # """
+    # trajs = eval_sampler.sample_decoded(
+    #     next_rng(), bc_sampler_policy, sampler_encoder, sampler_decoder, FLAGS.eval_n_trajs, deterministic=True,
+    # )
+    # decoder_metrics = {}
+    # decoder_metrics['average_return'] = np.mean([np.sum(t['rewards']) for t in trajs])
+    # decoder_metrics['average_traj_length'] = np.mean([len(t['rewards']) for t in trajs])
+    # decoder_metrics['average_normalizd_return'] = np.mean(
+    #     [eval_sampler.env.get_normalized_score(np.sum(t['rewards'])) for t in trajs]
+    # )
+    # print(decoder_metrics)
 
 
 

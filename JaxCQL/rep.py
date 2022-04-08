@@ -27,13 +27,13 @@ class REP(object):
         config = ConfigDict()
         config.encoder_lr = 3e-4 # 3e-4
         config.dis_lr = 3e-4
-        config.decoder_lr = 3e-4
+        config.decoder_lr = 3e-4 #3e-4
         config.qf_lr = 3e-4
         config.optimizer_type = 'adam'
         config.optimizer_b1 = 0.5 #0.5
         config.optimizer_b2 = 0.999
         config.recon_alpha = 1.0
-        config.z_alpha = 1.0
+        config.z_alpha = 0.0
         config.qf_alpha = 1.0
         config.prior = 'uniform'
         config.smooth_dis = False
@@ -67,7 +67,7 @@ class REP(object):
             'sgd': optax.sgd,
         }[self.config.optimizer_type]
 
-        discriminator_params = self.discriminator.init(next_rng(), jnp.zeros((10, self.observation_dim)), jnp.zeros((10, self.latent_ac_dim)))
+        discriminator_params = self.discriminator.init(next_rng(), jnp.zeros((10, self.observation_dim)), jnp.zeros((10, self.action_dim)))
         self._train_states['discriminator'] = TrainState.create(
             params=discriminator_params,
             tx=optimizer_class(self.config.dis_lr, b1=self.config.optimizer_b1, b2=self.config.optimizer_b2),
@@ -81,64 +81,70 @@ class REP(object):
             apply_fn=None,
         )
 
-        encoder_params = self.encoder.init(next_rng(), next_rng(), jnp.zeros((10, self.observation_dim)), jnp.zeros((10, self.action_dim)))
-        self._train_states['encoder'] = TrainState.create(
-            params=encoder_params,
-            tx=optimizer_class(self.config.encoder_lr),
-            apply_fn=None,
-        )
+        # encoder_params = self.encoder.init(next_rng(), next_rng(), jnp.zeros((10, self.observation_dim)), jnp.zeros((10, self.action_dim)))
+        # self._train_states['encoder'] = TrainState.create(
+        #     params=encoder_params,
+        #     tx=optimizer_class(self.config.encoder_lr),
+        #     apply_fn=None,
+        # )
 
-        model_keys = ['discriminator', 'encoder', 'decoder']
+        # model_keys = ['discriminator', 'encoder', 'decoder']
+        model_keys = ['discriminator', 'decoder']
 
-        if self.config.sarsa:
-            qf_params = self.qf.init(next_rng(), jnp.zeros((10, self.observation_dim)), jnp.zeros((10, self.action_dim)))
-            self._train_states['qf'] = TrainState.create(
-                params=qf_params,
-                tx=optimizer_class(self.config.qf_lr),
-                apply_fn=None,
-            ) 
-            model_keys.append('qf')
+        # if self.config.sarsa:
+        #     qf_params = self.qf.init(next_rng(), jnp.zeros((10, self.observation_dim)), jnp.zeros((10, self.action_dim)))
+        #     self._train_states['qf'] = TrainState.create(
+        #         params=qf_params,
+        #         tx=optimizer_class(self.config.qf_lr),
+        #         apply_fn=None,
+        #     ) 
+        #     model_keys.append('qf')
 
-            self._target_qf_params = deepcopy({'qf': qf_params})
-        else:
-            self._target_qf_params = None
+        #     self._target_qf_params = deepcopy({'qf': qf_params})
+        # else:
+        #     self._target_qf_params = None
 
-        if self.config.use_automatic_qf_tuning:
-            self.qf_alpha = Scalar(0.0)
-            self._train_states['qf_alpha'] = TrainState.create(
-                params=self.qf_alpha.init(next_rng()),
-                tx=optimizer_class(self.config.qf_lr),
-                apply_fn=None
-            )
-            model_keys.append('qf_alpha') 
+        # if self.config.use_automatic_qf_tuning:
+        #     self.qf_alpha = Scalar(0.0)
+        #     self._train_states['qf_alpha'] = TrainState.create(
+        #         params=self.qf_alpha.init(next_rng()),
+        #         tx=optimizer_class(self.config.qf_lr),
+        #         apply_fn=None
+        #     )
+        #     model_keys.append('qf_alpha') 
 
         self._model_keys = tuple(model_keys)
         self._total_steps = 0
 
     def train(self, batch):
         self._total_steps += 1
-        self._train_states, self._target_qf_params, metrics = self._train_step(
-            self._train_states, self._target_qf_params, next_rng(), batch, True
+        # self._train_states, self._target_qf_params, metrics = self._train_step(
+        #     self._train_states, self._target_qf_params, next_rng(), batch, True
+        # )
+        self._train_states, metrics = self._train_step(
+            self._train_states, next_rng(), batch, True
         )
         return metrics
 
     def val(self, batch):
-        _, _, metrics = self._train_step(
-            self._train_states, self._target_qf_params, next_rng(), batch, False
+        _, metrics = self._train_step(
+            self._train_states, next_rng(), batch, False
         )
         return metrics
 
         
     @partial(jax.jit, static_argnames=('self', 'train'))
-    def _train_step(self, train_states, target_qf_params, rng, batch, train=True):
+    # def _train_step(self, train_states, target_qf_params, rng, batch, train=True):
+    def _train_step(self, train_states, rng, batch, train=True):
 
         def loss_fn(train_params, rng):
             observations = batch['observations']
             actions = batch['actions']
-            next_observations = batch['next_observations']
-            next_actions = batch['next_actions']
-            rewards = batch['rewards']
-            dones = batch['dones']
+            # dataset_latent_actions = batch['latent_actions']
+            # next_observations = batch['next_observations']
+            # next_actions = batch['next_actions']
+            # rewards = batch['rewards']
+            # dones = batch['dones']
 
 
             batch_size, _ = jnp.shape(observations)
@@ -146,8 +152,8 @@ class REP(object):
 
             loss_collection = {}
 
-            rng, split_rng = jax.random.split(rng)
-            latent_actions, _ = self.encoder.apply(train_params['encoder'], split_rng, observations, actions)
+            # rng, split_rng = jax.random.split(rng)
+            # latent_actions, _ = self.encoder.apply(train_params['encoder'], split_rng, observations, actions)
 
             if self.config.prior == 'uniform':
                 rng, split_rng = jax.random.split(rng)
@@ -159,91 +165,102 @@ class REP(object):
             valid = jnp.ones((batch_size))
             fake = jnp.zeros((batch_size))
 
-            g_loss = adversarial_loss(self.discriminator.apply(train_params['discriminator'], observations, latent_actions), valid)
-            decoded_actions = self.decoder.apply(train_params['decoder'], observations, latent_actions) 
-            reconstruct_loss = mse_loss(decoded_actions, actions)
+            # g_loss = adversarial_loss(self.discriminator.apply(train_params['discriminator'], observations, latent_actions), valid)
+            # decoded_actions = self.decoder.apply(train_params['decoder'], observations, latent_actions) 
+            # reconstruct_loss = mse_loss(decoded_actions, actions)
+
+            generated_actions = self.decoder.apply(train_params['decoder'], observations, marginals)
+            g_loss = adversarial_loss(self.discriminator.apply(train_params['discriminator'], observations, generated_actions), valid)
+            loss_collection['decoder'] = g_loss
+
+
+
 
             ### SARSA Part ###
 
-            if self.config.sarsa:
-                q_pred = self.qf.apply(train_params['qf'], observations, decoded_actions) 
-                target_q_values = self.qf.apply(target_qf_params['qf'], next_observations, next_actions)
-                td_target = jax.lax.stop_gradient(
-                    rewards + (1. - dones) * self.config.discount * target_q_values
-                )
-                qf_loss = mse_loss(q_pred, td_target)
-                loss_collection['qf'] = qf_loss
-            else:
-                qf_loss = 0.0
+            # if self.config.sarsa:
+            #     q_pred = self.qf.apply(train_params['qf'], observations, decoded_actions) 
+            #     target_q_values = self.qf.apply(target_qf_params['qf'], next_observations, next_actions)
+            #     td_target = jax.lax.stop_gradient(
+            #         rewards + (1. - dones) * self.config.discount * target_q_values
+            #     )
+            #     qf_loss = mse_loss(q_pred, td_target)
+            #     loss_collection['qf'] = qf_loss
+            # else:
+            #     qf_loss = 0.0
 
-            rep_loss = g_loss + self.config.recon_alpha * reconstruct_loss
+            # rep_loss = g_loss + self.config.recon_alpha * reconstruct_loss
 
-            if self.config.use_automatic_qf_tuning:
-                qf_alpha_loss = -self.qf_alpha.apply(train_params['qf_alpha']) * (qf_loss - 100.0)
-                loss_collection['qf_alpha'] = qf_alpha_loss
-                qf_alpha = jnp.exp(self.qf_alpha.apply(train_params['qf_alpha']))
-                qf_alpha = jnp.clip(qf_alpha, 0.0, 1000.0)
-            else:
-                qf_alpha_loss = 0.0
-                loss_collection['qf_alpha'] = qf_alpha_loss
-                qf_alpha = self.config.qf_alpha
+            # if self.config.use_automatic_qf_tuning:
+            #     qf_alpha_loss = -self.qf_alpha.apply(train_params['qf_alpha']) * (qf_loss - 100.0)
+            #     loss_collection['qf_alpha'] = qf_alpha_loss
+            #     qf_alpha = jnp.exp(self.qf_alpha.apply(train_params['qf_alpha']))
+            #     qf_alpha = jnp.clip(qf_alpha, 0.0, 1000.0)
+            # else:
+            #     qf_alpha_loss = 0.0
+            #     loss_collection['qf_alpha'] = qf_alpha_loss
+            #     qf_alpha = self.config.qf_alpha
 
-            if self.config.prior == 'uniform':
-                rng, split_rng = jax.random.split(rng)
-                random_z = jax.random.uniform(split_rng, (batch_size, self.latent_ac_dim), minval=-1.0, maxval=1.0)
-            elif self.config.prior == 'gaussian':
-                rng, split_rng = jax.random.split(rng)
-                random_z = jax.random.multivariate_normal(split_rng, jnp.zeros(self.latent_ac_dim), jnp.diag(jnp.ones(self.latent_ac_dim)), (batch_size, ))
+            # if self.config.prior == 'uniform':
+            #     rng, split_rng = jax.random.split(rng)
+            #     random_z = jax.random.uniform(split_rng, (batch_size, self.latent_ac_dim), minval=-1.0, maxval=1.0)
+            # elif self.config.prior == 'gaussian':
+            #     rng, split_rng = jax.random.split(rng)
+            #     random_z = jax.random.multivariate_normal(split_rng, jnp.zeros(self.latent_ac_dim), jnp.diag(jnp.ones(self.latent_ac_dim)), (batch_size, ))
 
-            random_z_decoded = self.decoder.apply(train_params['decoder'], observations, random_z)
-            rng, split_rng = jax.random.split(rng)
-            random_z_reconstructed, _ = self.encoder.apply(train_params['encoder'], split_rng, observations, random_z_decoded)
-            random_z_distance = mse_loss(random_z, random_z_reconstructed)
+            # random_z_decoded = self.decoder.apply(train_params['decoder'], observations, random_z)
+            # rng, split_rng = jax.random.split(rng)
+            # random_z_reconstructed, _ = self.encoder.apply(train_params['encoder'], split_rng, observations, random_z_decoded)
+            # random_z_distance = mse_loss(random_z, random_z_reconstructed)
 
-            rng, split_rng = jax.random.split(rng)
-            noise = jax.random.uniform(split_rng, (batch_size, self.action_dim), minval=-1.0, maxval=1.0)
-            random_a = actions + noise * 0.1
-            rng, split_rng = jax.random.split(rng)
-            random_a_rep, _ = self.encoder.apply(train_params['encoder'], split_rng, observations, random_a)
-            random_a_reconstructed = self.decoder.apply(train_params['decoder'], observations, random_a_rep)
-            random_a_distance = mse_loss(actions, random_a_reconstructed)
+            # rng, split_rng = jax.random.split(rng)
+            # noise = jax.random.uniform(split_rng, (batch_size, self.action_dim), minval=-1.0, maxval=1.0)
+            # random_a = actions + noise * 0.1
+            # rng, split_rng = jax.random.split(rng)
+            # random_a_rep, _ = self.encoder.apply(train_params['encoder'], split_rng, observations, random_a)
+            # random_a_reconstructed = self.decoder.apply(train_params['decoder'], observations, random_a_rep)
+            # random_a_distance = mse_loss(actions, random_a_reconstructed)
 
-            encoder_loss = rep_loss + self.config.z_alpha * random_z_distance + qf_alpha * qf_loss + self.config.z_alpha * random_a_distance
-            loss_collection['encoder'] = encoder_loss
+            # encoder_loss = rep_loss + self.config.z_alpha * random_z_distance + qf_alpha * qf_loss + self.config.z_alpha * random_a_distance
+            # loss_collection['encoder'] = encoder_loss
 
-            if self.config.smooth_decoder:
-                rng, split_rng = jax.random.split(rng)
-                noise = jax.random.normal(split_rng, jnp.shape(latent_actions)) * 0.2
-                perturbed_latent_actions = latent_actions + noise
-                perturbed_reconstruct_loss = mse_loss(self.decoder.apply(train_params['decoder'], observations, perturbed_latent_actions), actions)
-            else:
-                perturbed_reconstruct_loss = reconstruct_loss
+            # if self.config.smooth_decoder:
+            #     rng, split_rng = jax.random.split(rng)
+            #     noise = jax.random.normal(split_rng, jnp.shape(latent_actions)) * 0.2
+            #     perturbed_latent_actions = latent_actions + noise
+            #     perturbed_reconstruct_loss = mse_loss(self.decoder.apply(train_params['decoder'], observations, perturbed_latent_actions), actions)
+            # else:
+            #     perturbed_reconstruct_loss = reconstruct_loss
             
-            decoder_loss = perturbed_reconstruct_loss + qf_alpha * qf_loss 
-            loss_collection['decoder'] = decoder_loss
+            # decoder_loss = perturbed_reconstruct_loss + qf_alpha * qf_loss 
+            
+            # loss_collection['decoder'] = decoder_loss
 
-            if self.config.smooth_dis:
-                rng, split_rng = jax.random.split(rng)
-                bernoulli = jax.random.bernoulli(split_rng, 0.5, jnp.shape(valid)) * 0.2
-                valid = valid - bernoulli
+            # if self.config.smooth_dis:
+            #     rng, split_rng = jax.random.split(rng)
+            #     bernoulli = jax.random.bernoulli(split_rng, 0.5, jnp.shape(valid)) * 0.2
+            #     valid = valid - bernoulli
 
-            if self.dropout:
-                rng, split_rng, split_rng2 = jax.random.split(rng, 3) 
-                real_loss = adversarial_loss(self.discriminator.apply(train_params['discriminator'], observations, marginals, train=True,
-                            rngs={'dropout': split_rng}), valid)
-                latent_actions_cp = jax.lax.stop_gradient(latent_actions)
-                fake_loss = adversarial_loss(self.discriminator.apply(train_params['discriminator'], observations, latent_actions_cp, train=True,
-                            rngs={'dropout': split_rng2}), fake)
-            else:
-                real_loss = adversarial_loss(self.discriminator.apply(train_params['discriminator'], observations, marginals), valid)
-                latent_actions_cp = jax.lax.stop_gradient(latent_actions)
-                fake_loss = adversarial_loss(self.discriminator.apply(train_params['discriminator'], observations, latent_actions_cp), fake)
+            # if self.dropout:
+            #     rng, split_rng, split_rng2 = jax.random.split(rng, 3) 
+            #     real_loss = adversarial_loss(self.discriminator.apply(train_params['discriminator'], observations, marginals, train=True,
+            #                 rngs={'dropout': split_rng}), valid)
+            #     latent_actions_cp = jax.lax.stop_gradient(latent_actions)
+            #     fake_loss = adversarial_loss(self.discriminator.apply(train_params['discriminator'], observations, latent_actions_cp, train=True,
+            #                 rngs={'dropout': split_rng2}), fake)
+            # else:
+            #     real_loss = adversarial_loss(self.discriminator.apply(train_params['discriminator'], observations, marginals), valid)
+            #     latent_actions_cp = jax.lax.stop_gradient(latent_actions)
+            #     fake_loss = adversarial_loss(self.discriminator.apply(train_params['discriminator'], observations, latent_actions_cp), fake)
+
+            real_loss = adversarial_loss(self.discriminator.apply(train_params['discriminator'], observations, actions), valid)
+            fake_loss = adversarial_loss(self.discriminator.apply(train_params['discriminator'], observations, generated_actions), fake)
 
             d_loss = (real_loss + fake_loss) / 2
             loss_collection['discriminator'] = d_loss
 
             ### Accuracy ###
-            real_result = jax.lax.stop_gradient(self.discriminator.apply(train_params['discriminator'], observations, marginals))
+            real_result = jax.lax.stop_gradient(self.discriminator.apply(train_params['discriminator'], observations, actions))
             real_pred1 = real_result >= 0.5
             real_accuracy = jnp.mean(real_pred1 * 1.0)
             real_pred_mean = jnp.mean(real_result)
@@ -253,7 +270,7 @@ class REP(object):
             real_pred_median = jnp.median(real_result)
 
             fake_result = jax.lax.stop_gradient(
-                self.discriminator.apply(train_params['discriminator'], observations, latent_actions_cp)
+                self.discriminator.apply(train_params['discriminator'], observations, generated_actions)
              ) 
             fake_pred1 = fake_result <= 0.5
             fake_accuracy = jnp.mean(fake_pred1 * 1.0)
@@ -264,18 +281,18 @@ class REP(object):
             fake_pred_median = jnp.median(fake_result)
 
             ### latent action statistics ###
-            if self.config.latent_stats_logging:
-                _ , actions_mean, actions_logstd = self.encoder.apply(train_params['encoder'], split_rng, observations, actions, method=self.encoder.get_statistics)
-                ac_std = jnp.exp(actions_logstd)
-                latent_ac_max = jnp.max(actions_mean)
-                latent_ac_min = jnp.min(actions_mean)
-                latent_ac_mean = jnp.mean(actions_mean)
-                latent_ac_std = jnp.std(actions_mean)
+            # if self.config.latent_stats_logging:
+            #     _ , actions_mean, actions_logstd = self.encoder.apply(train_params['encoder'], split_rng, observations, actions, method=self.encoder.get_statistics)
+            #     ac_std = jnp.exp(actions_logstd)
+            #     latent_ac_max = jnp.max(actions_mean)
+            #     latent_ac_min = jnp.min(actions_mean)
+            #     latent_ac_mean = jnp.mean(actions_mean)
+            #     latent_ac_std = jnp.std(actions_mean)
 
-                latent_ac_std_max = jnp.max(ac_std)
-                latent_ac_std_min = jnp.min(ac_std)
-                latent_ac_std_mean = jnp.mean(ac_std)
-                latent_ac_std_std = jnp.std(ac_std) 
+            #     latent_ac_std_max = jnp.max(ac_std)
+            #     latent_ac_std_min = jnp.min(ac_std)
+            #     latent_ac_std_mean = jnp.mean(ac_std)
+            #     latent_ac_std_std = jnp.std(ac_std) 
 
             return tuple(loss_collection[key] for key in self.model_keys), locals()
 
@@ -287,29 +304,29 @@ class REP(object):
                 key: train_states[key].apply_gradients(grads=grads[i][key])
                 for i, key in enumerate(self.model_keys)
             }
-            if self.config.sarsa:
-                new_target_qf_params = {}
-                new_target_qf_params['qf'] = update_target_network(
-                new_train_states['qf'].params, target_qf_params['qf'],
-                self.config.soft_target_update_rate)
-            else:
-                new_target_qf_params = None
+            # if self.config.sarsa:
+            #     new_target_qf_params = {}
+            #     new_target_qf_params['qf'] = update_target_network(
+            #     new_train_states['qf'].params, target_qf_params['qf'],
+            #     self.config.soft_target_update_rate)
+            # else:
+            #     new_target_qf_params = None
         else:
             new_train_states = copy.deepcopy(train_states)
-            new_target_qf_params = copy.deepcopy(target_qf_params)
+            # new_target_qf_params = copy.deepcopy(target_qf_params)
 
         metrics = dict(
             g_loss=aux_values['g_loss'],
-            rep_loss=aux_values['rep_loss'],
-            encoder_loss=aux_values['encoder_loss'],
-            reconstruct_loss=aux_values['reconstruct_loss'],
-            decoder_loss=aux_values['decoder_loss'],
-            qf_loss=aux_values['qf_loss'],
-            qf_alpha=aux_values['qf_alpha'],
-            qf_alpha_loss=aux_values['qf_alpha_loss'],
-            random_z_distance=aux_values['random_z_distance'],
-            random_a_distance=aux_values['random_a_distance'],
-            perturbed_decoder_loss=aux_values['perturbed_reconstruct_loss'],
+            # rep_loss=aux_values['rep_loss'],
+            # encoder_loss=aux_values['encoder_loss'],
+            # reconstruct_loss=aux_values['reconstruct_loss'],
+            # decoder_loss=aux_values['decoder_loss'],
+            # qf_loss=aux_values['qf_loss'],
+            # qf_alpha=aux_values['qf_alpha'],
+            # qf_alpha_loss=aux_values['qf_alpha_loss'],
+            # random_z_distance=aux_values['random_z_distance'],
+            # random_a_distance=aux_values['random_a_distance'],
+            # perturbed_decoder_loss=aux_values['perturbed_reconstruct_loss'],
             discriminator_loss=aux_values['d_loss'],
             real_accuracy=aux_values['real_accuracy'],
             fake_accuracy=aux_values['fake_accuracy'],
@@ -325,21 +342,22 @@ class REP(object):
             fake_pred_median=aux_values['fake_pred_median'],
         )
 
-        if self.config.latent_stats_logging:
-            metrics.update(prefix_metrics(dict(
-                latent_ac_max=aux_values['latent_ac_max'],
-                latent_ac_min=aux_values['latent_ac_min'],
-                latent_ac_mean=aux_values['latent_ac_mean'],
-                latent_ac_std=aux_values['latent_ac_std'],
+        # if self.config.latent_stats_logging:
+        #     metrics.update(prefix_metrics(dict(
+        #         latent_ac_max=aux_values['latent_ac_max'],
+        #         latent_ac_min=aux_values['latent_ac_min'],
+        #         latent_ac_mean=aux_values['latent_ac_mean'],
+        #         latent_ac_std=aux_values['latent_ac_std'],
 
-                latent_ac_std_max=aux_values['latent_ac_std_max'],
-                latent_ac_std_min=aux_values['latent_ac_std_min'],
-                latent_ac_std_mean=aux_values['latent_ac_std_mean'],
-                latent_ac_std_std=aux_values['latent_ac_std_std'],
+        #         latent_ac_std_max=aux_values['latent_ac_std_max'],
+        #         latent_ac_std_min=aux_values['latent_ac_std_min'],
+        #         latent_ac_std_mean=aux_values['latent_ac_std_mean'],
+        #         latent_ac_std_std=aux_values['latent_ac_std_std'],
 
-            ), 'latent_actions'))
+        #     ), 'latent_actions'))
+        return new_train_states, metrics
 
-        return new_train_states, new_target_qf_params, metrics
+        # return new_train_states, new_target_qf_params, metrics
 
 
 
