@@ -64,9 +64,9 @@ FLAGS_DEF = define_flags_with_default(
     encoder_arch='256-256-256-256',
     decoder_arch='256-256-256',
     decorrelation_method='GAN',
-    decorrelation_epochs=10, 
+    decorrelation_epochs=500, 
     decor_n_train_step_per_epoch=1000,
-    policy_n_epochs=10,
+    policy_n_epochs=100,
     policy_n_train_step_per_epoch=500,
     latent_dim=2.0,
     dis_dropout=False,
@@ -93,7 +93,7 @@ def main(argv):
         include_exp_prefix_sub_dir=False
     )
 
-    model_dir = 'antmaze_models'
+    model_dir = 'models'
     os.makedirs(model_dir, exist_ok=True)
 
     set_random_seed(FLAGS.seed)
@@ -104,8 +104,8 @@ def main(argv):
     latent_action_dim = int(FLAGS.latent_dim * action_dim)
     
 
-    # dataset = get_d4rl_dataset(eval_sampler.env)
-    dataset = get_preprocessed_dataset(eval_sampler.env, latent_action_dim)
+    dataset = get_d4rl_dataset(eval_sampler.env)
+    # dataset = get_preprocessed_dataset(eval_sampler.env, latent_action_dim)
     dataset['rewards'] = dataset['rewards'] * FLAGS.reward_scale + FLAGS.reward_bias
     dataset['actions'] = np.clip(dataset['actions'], -FLAGS.clip_action, FLAGS.clip_action)
 
@@ -135,8 +135,8 @@ def main(argv):
 
     discriminator = Discriminator(
         observation_dim, 
-        # latent_action_dim,
-        action_dim,
+        latent_action_dim,
+        # action_dim,
         FLAGS.discriminator_arch,
         FLAGS.dis_dropout,
     )
@@ -184,13 +184,13 @@ def main(argv):
             logger.record_dict(metrics)
             logger.dump_tabular(with_prefix=False, with_timestamp=False)
 
-        filename = '-'.join([FLAGS.env, str(FLAGS.seed), str(FLAGS.decorrelation_epochs), rep.config.prior, str(FLAGS.rep_batch_size), str(rep.config.recon_alpha), str(FLAGS.dis_dropout), str(rep.config.smooth_dis)]) + '.pkl' 
+        filename = '-'.join([FLAGS.env, str(FLAGS.seed), str(rep.config.recon_alpha), str(rep.config.z_alpha)]) + '.pkl' 
 
         with open(os.path.join(model_dir, filename), 'wb') as fout:
             rep_data = {'rep': rep, 'variant': variant, 'epoch': epoch}
             pickle.dump(rep_data, fout)
     else:
-        filename = '-'.join([FLAGS.env, str(FLAGS.rep_seed), str(FLAGS.decorrelation_epochs), rep.config.prior, str(FLAGS.rep_batch_size), str(rep.config.recon_alpha), str(FLAGS.dis_dropout), str(rep.config.smooth_dis)]) + '.pkl' 
+        filename = '-'.join([FLAGS.env, str(FLAGS.rep_seed), str(rep.config.recon_alpha), str(rep.config.z_alpha)]) + '.pkl' 
 
         with open(os.path.join(model_dir, filename), 'rb') as fin:
             rep_data = pickle.load(fin)

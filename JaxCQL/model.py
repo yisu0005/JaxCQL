@@ -8,7 +8,7 @@ import flax
 from flax import linen as nn
 import distrax
 
-from .jax_utils import extend_and_repeat, next_rng
+from .jax_utils import batch_to_jax, extend_and_repeat, next_rng
 
 
 def update_target_network(main_params, target_params, tau):
@@ -84,9 +84,10 @@ class FullyConnectedNetwork(nn.Module):
     output_dim: int
     arch: str = '256-256'
     orthogonal_init: bool = False
+    batch_norm: bool = False
 
     @nn.compact
-    def __call__(self, input_tensor):
+    def __call__(self, input_tensor, train_mode=True):
         x = input_tensor
         hidden_sizes = [int(h) for h in self.arch.split('-')]
         for h in hidden_sizes:
@@ -98,6 +99,10 @@ class FullyConnectedNetwork(nn.Module):
                 )(x)
             else:
                 x = nn.Dense(h)(x)
+            if self.batch_norm:
+                x = nn.BatchNorm(use_running_average=not train_mode, momentum=0.9,
+                        epsilon=1e-5,
+                        dtype=jnp.float32)(x)
             x = nn.relu(x)
 
         if self.orthogonal_init:
@@ -125,6 +130,7 @@ class FullyConnectedNetworkWithLastLayer(nn.Module):
     @nn.compact
     def __call__(self, input_tensor):
         x = input_tensor
+        batch, _ = jnp.shape(x)
         hidden_sizes = [int(h) for h in self.arch.split('-')]
         for h in hidden_sizes:
             if self.orthogonal_init:
@@ -135,7 +141,11 @@ class FullyConnectedNetworkWithLastLayer(nn.Module):
                 )(x)
             else:
                 x = nn.Dense(h)(x)
+            x = nn.LayerNorm()(x)
             x = nn.relu(x)
+         # normalized = jnp.reshape(jnp.sqrt(jnp.sum(x**2, axis=-1) + 1e-6), (batch,1))
+        # x = x / normalized
+        # x = x / (jnp.sqrt(jnp.sum(x**2, axis=-1) + 1e-6))
 
         if self.orthogonal_init:
             output = nn.Dense(
@@ -228,11 +238,12 @@ class ActionRepresentationPolicy(nn.Module):
     no_tanh: bool = False
     log_std_multiplier: float = 1.0
     log_std_offset: float = -1.0
-    # action_scale: float = 1.0
+    batch_norm: bool = True
+
 
     def setup(self):
         self.base_network = FullyConnectedNetwork(
-            output_dim=2 * self.latent_action_dim, arch=self.arch, orthogonal_init=self.orthogonal_init
+            output_dim=2 * self.latent_action_dim, arch=self.arch, orthogonal_init=self.orthogonal_init, batch_norm=self.batch_norm
         )
         self.log_std_multiplier_module = Scalar(self.log_std_multiplier)
         self.log_std_offset_module = Scalar(self.log_std_offset)
@@ -283,7 +294,7 @@ class ActionRepresentationPolicy(nn.Module):
         if repeat is not None:
             observations = extend_and_repeat(observations, 1, repeat)
         x = jnp.concatenate([observations, actions], axis=-1)
-        base_network_output = self.base_network(x)
+        base_network_output = self.base_network(x, train_mode=False)
         mean, log_std = jnp.split(base_network_output, 2, axis=-1)
         log_std = self.log_std_multiplier_module() * log_std + self.log_std_offset_module()
         log_std = jnp.clip(log_std, -20.0, 2.0)
@@ -352,10 +363,11 @@ class ActionSeperatedDecoder(nn.Module):
     action_dim: int
     arch: str = '256-256'
     orthogonal_init: bool = False
+    batch_norm: bool = True
 
     @nn.compact
     @multiple_action_decode_function
-    def __call__(self, observations, latent_actions):
+    def __call__(self, observations, latent_actions, train_mode=True):
         x = observations
         hidden_sizes = [int(h) for h in self.arch.split('-')]
         for h in hidden_sizes:
@@ -367,7 +379,12 @@ class ActionSeperatedDecoder(nn.Module):
                 )(jnp.concatenate([x, latent_actions], axis=-1))
             else:
                 x = nn.Dense(h)(jnp.concatenate([x, latent_actions], axis=-1))
+            if self.batch_norm:
+                x = nn.BatchNorm(use_running_average=not train_mode, momentum=0.9,
+                        epsilon=1e-5,
+                        dtype=jnp.float32)(x)
             x = nn.relu(x)
+
 
         if self.orthogonal_init:
             x = nn.Dense(
@@ -438,7 +455,7 @@ class SamplerDecoder(object):
 
     @partial(jax.jit, static_argnames=('self'))
     def act(self, params, observations, actions_rep):
-        return self.decoder.apply(params, observations, actions_rep)
+        return self.decoder.apply(params, observations, actions_rep, train_mode=False)
 
     def __call__(self, observations, actions_rep):
         actions = self.act(self.params, observations, actions_rep)
