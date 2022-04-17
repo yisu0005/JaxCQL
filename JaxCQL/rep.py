@@ -25,15 +25,16 @@ class REP(object):
     @staticmethod
     def get_default_config(updates=None):
         config = ConfigDict()
-        config.encoder_lr = 3e-4 # 3e-4
+        config.encoder_lr = 3e-4
         config.dis_lr = 3e-4
-        config.decoder_lr = 3e-4 #3e-4
+        config.decoder_lr = 3e-4
         config.qf_lr = 3e-4
         config.optimizer_type = 'adam'
-        config.optimizer_b1 = 0.5 #0.5
+        config.optimizer_b1 = 0.5 
         config.optimizer_b2 = 0.999
         config.recon_alpha = 0.01
         config.z_alpha = 0.1
+        config.decoder_z_alpha = 0.0
         config.qf_alpha = 0.0
         config.prior = 'uniform'
         config.smooth_dis = False
@@ -151,7 +152,7 @@ class REP(object):
             loss_collection = {}
 
             rng, split_rng = jax.random.split(rng)
-            (latent_actions, _) , _ = self.encoder.apply(train_params['encoder'], split_rng, observations, actions, mutable=['batch_stats'])
+            (latent_actions, _) = self.encoder.apply(train_params['encoder'], split_rng, observations, actions)
 
             if self.config.prior == 'uniform':
                 rng, split_rng = jax.random.split(rng)
@@ -164,7 +165,7 @@ class REP(object):
             fake = jnp.zeros((batch_size))
 
             g_loss = adversarial_loss(self.discriminator.apply(train_params['discriminator'], observations, latent_actions), valid)
-            decoded_actions, _ = self.decoder.apply(train_params['decoder'], observations, latent_actions, mutable=['batch_stats'])
+            decoded_actions = self.decoder.apply(train_params['decoder'], observations, latent_actions)
             reconstruct_loss = mse_loss(decoded_actions, actions)
 
             # generated_actions = self.decoder.apply(train_params['decoder'], observations, marginals)
@@ -203,17 +204,17 @@ class REP(object):
                 rng, split_rng = jax.random.split(rng)
                 random_z = jax.random.multivariate_normal(split_rng, jnp.zeros(self.latent_ac_dim), jnp.diag(jnp.ones(self.latent_ac_dim)), (batch_size, ))
 
-            random_z_decoded, _ = self.decoder.apply(train_params['decoder'], observations, random_z, mutable=['batch_stats'])
+            random_z_decoded = self.decoder.apply(train_params['decoder'], observations, random_z)
             rng, split_rng = jax.random.split(rng)
-            (random_z_reconstructed, _), _ = self.encoder.apply(train_params['encoder'], split_rng, observations, random_z_decoded, mutable=['batch_stats'])
+            (random_z_reconstructed, _) = self.encoder.apply(train_params['encoder'], split_rng, observations, random_z_decoded)
             random_z_distance = mse_loss(random_z, random_z_reconstructed)
 
             rng, split_rng = jax.random.split(rng)
             noise = jax.random.uniform(split_rng, (batch_size, self.action_dim), minval=-1.0, maxval=1.0)
             random_a = actions + noise * 0.1
             rng, split_rng = jax.random.split(rng)
-            (random_a_rep, _), _ = self.encoder.apply(train_params['encoder'], split_rng, observations, random_a, mutable=['batch_stats'])
-            random_a_reconstructed, _ = self.decoder.apply(train_params['decoder'], observations, random_a_rep, mutable=['batch_stats'])
+            (random_a_rep, _) = self.encoder.apply(train_params['encoder'], split_rng, observations, random_a)
+            random_a_reconstructed = self.decoder.apply(train_params['decoder'], observations, random_a_rep)
             random_a_distance = mse_loss(actions, random_a_reconstructed)
 
             # encoder_loss = rep_loss + self.config.z_alpha * random_z_distance + qf_alpha * qf_loss + self.config.z_alpha * random_a_distance
@@ -230,7 +231,7 @@ class REP(object):
                 perturbed_reconstruct_loss = reconstruct_loss
             
             # decoder_loss = perturbed_reconstruct_loss + qf_alpha * qf_loss 
-            decoder_loss = perturbed_reconstruct_loss
+            decoder_loss = perturbed_reconstruct_loss + self.config.decoder_z_alpha * random_z_distance + self.config.decoder_z_alpha * random_a_distance 
             loss_collection['decoder'] = decoder_loss
 
             if self.config.smooth_dis:
