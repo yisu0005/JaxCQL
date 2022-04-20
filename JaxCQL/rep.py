@@ -28,38 +28,35 @@ class REP(object):
         config.encoder_lr = 3e-4
         config.dis_lr = 3e-4
         config.decoder_lr = 3e-4
-        config.qf_lr = 3e-4
         config.optimizer_type = 'adam'
         config.optimizer_b1 = 0.5 
         config.optimizer_b2 = 0.999
         config.recon_alpha = 0.01
         config.z_alpha = 0.1
         config.decoder_z_alpha = 0.0
-        config.qf_alpha = 0.0
         config.prior = 'uniform'
         config.smooth_dis = False
         config.smooth_decoder = False
         config.latent_stats_logging = True
-        config.sarsa = False
         config.discount = 0.99
-        config.use_automatic_qf_tuning = False
         config.soft_target_update_rate = 5e-3
+        config.action_dis_alpha = 1.0
 
         if updates is not None:
             config.update(ConfigDict(updates).copy_and_resolve_references())
         return config
 
-    def __init__(self, config, encoder, discriminator, decoder, qf, method='GAN'):
+    def __init__(self, config, encoder, discriminator, decoder, action_discriminator, method='GAN'):
         self.config = self.get_default_config(config)
         self.encoder = encoder
         self.discriminator = discriminator
         self.decoder = decoder
         self.method = method
+        self.action_discriminator = action_discriminator
         self.observation_dim = encoder.observation_dim
         self.action_dim = encoder.action_dim
         self.latent_ac_dim = encoder.latent_action_dim
         self.dropout = discriminator.dropout
-        self.qf = qf
 
         self._train_states = {}
 
@@ -75,6 +72,13 @@ class REP(object):
             apply_fn=None,
         )
 
+        # action_discriminator_params = self.action_discriminator.init(next_rng(), jnp.zeros((10, self.observation_dim)), jnp.zeros((10, self.action_dim)))
+        # self._train_states['action_discriminator'] = TrainState.create(
+        #     params=action_discriminator_params,
+        #     tx=optimizer_class(self.config.dis_lr, b1=self.config.optimizer_b1, b2=self.config.optimizer_b2),
+        #     apply_fn=None,
+        # )
+
         decoder_params = self.decoder.init(next_rng(), jnp.zeros((10, self.observation_dim)), jnp.zeros((10, self.latent_ac_dim)))
         self._train_states['decoder'] = TrainState.create(
             params=decoder_params,
@@ -89,39 +93,15 @@ class REP(object):
             apply_fn=None,
         )
 
+        # model_keys = ['discriminator', 'encoder', 'decoder', 'action_discriminator']
         model_keys = ['discriminator', 'encoder', 'decoder']
-        # model_keys = ['discriminator', 'decoder']
-
-        # if self.config.sarsa:
-        #     qf_params = self.qf.init(next_rng(), jnp.zeros((10, self.observation_dim)), jnp.zeros((10, self.action_dim)))
-        #     self._train_states['qf'] = TrainState.create(
-        #         params=qf_params,
-        #         tx=optimizer_class(self.config.qf_lr),
-        #         apply_fn=None,
-        #     ) 
-        #     model_keys.append('qf')
-
-        #     self._target_qf_params = deepcopy({'qf': qf_params})
-        # else:
-        #     self._target_qf_params = None
-
-        # if self.config.use_automatic_qf_tuning:
-        #     self.qf_alpha = Scalar(0.0)
-        #     self._train_states['qf_alpha'] = TrainState.create(
-        #         params=self.qf_alpha.init(next_rng()),
-        #         tx=optimizer_class(self.config.qf_lr),
-        #         apply_fn=None
-        #     )
-        #     model_keys.append('qf_alpha') 
 
         self._model_keys = tuple(model_keys)
         self._total_steps = 0
 
     def train(self, batch):
         self._total_steps += 1
-        # self._train_states, self._target_qf_params, metrics = self._train_step(
-        #     self._train_states, self._target_qf_params, next_rng(), batch, True
-        # )
+
         self._train_states, metrics = self._train_step(
             self._train_states, next_rng(), batch, True
         )
@@ -135,7 +115,6 @@ class REP(object):
 
         
     @partial(jax.jit, static_argnames=('self', 'train'))
-    # def _train_step(self, train_states, target_qf_params, rng, batch, train=True):
     def _train_step(self, train_states, rng, batch, train=True):
 
         def loss_fn(train_params, rng):
@@ -172,30 +151,8 @@ class REP(object):
             # g_loss = adversarial_loss(self.discriminator.apply(train_params['discriminator'], observations, generated_actions), valid)
             # loss_collection['decoder'] = g_loss
 
-            ### SARSA Part ###
-
-            # if self.config.sarsa:
-            #     q_pred = self.qf.apply(train_params['qf'], observations, decoded_actions) 
-            #     target_q_values = self.qf.apply(target_qf_params['qf'], next_observations, next_actions)
-            #     td_target = jax.lax.stop_gradient(
-            #         rewards + (1. - dones) * self.config.discount * target_q_values
-            #     )
-            #     qf_loss = mse_loss(q_pred, td_target)
-            #     loss_collection['qf'] = qf_loss
-            # else:
-            #     qf_loss = 0.0
 
             rep_loss = g_loss + self.config.recon_alpha * reconstruct_loss
-
-            # if self.config.use_automatic_qf_tuning:
-            #     qf_alpha_loss = -self.qf_alpha.apply(train_params['qf_alpha']) * (qf_loss - 100.0)
-            #     loss_collection['qf_alpha'] = qf_alpha_loss
-            #     qf_alpha = jnp.exp(self.qf_alpha.apply(train_params['qf_alpha']))
-            #     qf_alpha = jnp.clip(qf_alpha, 0.0, 1000.0)
-            # else:
-            #     qf_alpha_loss = 0.0
-            #     loss_collection['qf_alpha'] = qf_alpha_loss
-            #     qf_alpha = self.config.qf_alpha
 
             if self.config.prior == 'uniform':
                 rng, split_rng = jax.random.split(rng)
@@ -217,9 +174,26 @@ class REP(object):
             random_a_reconstructed = self.decoder.apply(train_params['decoder'], observations, random_a_rep)
             random_a_distance = mse_loss(actions, random_a_reconstructed)
 
-            # encoder_loss = rep_loss + self.config.z_alpha * random_z_distance + qf_alpha * qf_loss + self.config.z_alpha * random_a_distance
-            encoder_loss = rep_loss + self.config.z_alpha * random_z_distance + self.config.z_alpha * random_a_distance
+            # if self.config.prior == 'uniform':
+            #     rng, split_rng = jax.random.split(rng)
+            #     prior_z = jax.random.uniform(split_rng, (batch_size, self.latent_ac_dim), minval=-1.0, maxval=1.0)
+            # elif self.config.prior == 'gaussian':
+            #     rng, split_rng = jax.random.split(rng)
+            #     prior_z = jax.random.multivariate_normal(split_rng, jnp.zeros(self.latent_ac_dim), jnp.diag(jnp.ones(self.latent_ac_dim)), (batch_size, ))
+            
+            # ###### additional action discriminator loss ######
+            # prior_z_decoded = self.decoder.apply(train_params['decoder'], observations, prior_z)
+            # action_g_loss =  adversarial_loss(self.action_discriminator.apply(train_params['action_discriminator'], observations, actions), valid)
 
+            # action_real_loss = adversarial_loss(self.action_discriminator.apply(train_params['action_discriminator'], observations, prior_z_decoded), valid)
+            # action_fake_loss = adversarial_loss(self.action_discriminator.apply(train_params['action_discriminator'], observations, actions), fake)
+
+            # action_d_loss = (action_real_loss + action_fake_loss) / 2
+            # loss_collection['action_discriminator'] = action_d_loss
+            ####################################################
+
+
+            encoder_loss = rep_loss + self.config.z_alpha * random_z_distance + self.config.z_alpha * random_a_distance
             loss_collection['encoder'] = encoder_loss 
 
             if self.config.smooth_decoder:
@@ -230,8 +204,8 @@ class REP(object):
             else:
                 perturbed_reconstruct_loss = reconstruct_loss
             
-            # decoder_loss = perturbed_reconstruct_loss + qf_alpha * qf_loss 
-            decoder_loss = perturbed_reconstruct_loss + self.config.decoder_z_alpha * random_z_distance + self.config.decoder_z_alpha * random_a_distance 
+            # decoder_loss = perturbed_reconstruct_loss + self.config.decoder_z_alpha * random_z_distance + self.config.decoder_z_alpha * random_a_distance + self.config.action_dis_alpha * action_g_loss
+            decoder_loss = perturbed_reconstruct_loss + self.config.decoder_z_alpha * random_z_distance + self.config.decoder_z_alpha * random_a_distance
             loss_collection['decoder'] = decoder_loss
 
             if self.config.smooth_dis:
@@ -250,15 +224,11 @@ class REP(object):
                 real_loss = adversarial_loss(self.discriminator.apply(train_params['discriminator'], observations, marginals), valid)
                 fake_loss = adversarial_loss(self.discriminator.apply(train_params['discriminator'], observations, latent_actions), fake)
 
-            # real_loss = adversarial_loss(self.discriminator.apply(train_params['discriminator'], observations, actions), valid)
-            # fake_loss = adversarial_loss(self.discriminator.apply(train_params['discriminator'], observations, generated_actions), fake)
-
             d_loss = (real_loss + fake_loss) / 2
             loss_collection['discriminator'] = d_loss
 
             ### Accuracy ###
             real_result = jax.lax.stop_gradient(self.discriminator.apply(train_params['discriminator'], observations, marginals))
-            # real_result = jax.lax.stop_gradient(self.discriminator.apply(train_params['discriminator'], observations, actions))
             real_pred1 = real_result >= 0.5
             real_accuracy = jnp.mean(real_pred1 * 1.0)
             real_pred_mean = jnp.mean(real_result)
@@ -270,9 +240,6 @@ class REP(object):
             fake_result = jax.lax.stop_gradient(
                 self.discriminator.apply(train_params['discriminator'], observations, latent_actions)
              ) 
-            # fake_result = jax.lax.stop_gradient(
-            #     self.discriminator.apply(train_params['discriminator'], observations, generated_actions)
-            #  ) 
             fake_pred1 = fake_result <= 0.5
             fake_accuracy = jnp.mean(fake_pred1 * 1.0)
             fake_pred_mean = jnp.mean(fake_result)
@@ -280,6 +247,27 @@ class REP(object):
             fake_pred_min = jnp.min(fake_result)
             fake_pred_std = jnp.std(fake_result)
             fake_pred_median = jnp.median(fake_result)
+
+            # ### Action Discriminator Accuracy ###
+            # actions_real_result = jax.lax.stop_gradient(self.action_discriminator.apply(train_params['action_discriminator'], observations, prior_z_decoded))
+            # actions_real_pred1 = actions_real_result >= 0.5
+            # actions_real_accuracy = jnp.mean(actions_real_pred1 * 1.0)
+            # actions_real_pred_mean = jnp.mean(actions_real_result)
+            # actions_real_pred_max = jnp.max(actions_real_result)
+            # actions_real_pred_min = jnp.min(actions_real_result)
+            # actions_real_pred_std = jnp.std(actions_real_result)
+            # actions_real_pred_median = jnp.median(actions_real_result)
+
+            # actions_fake_result = jax.lax.stop_gradient(
+            #     self.action_discriminator.apply(train_params['action_discriminator'], observations, actions)
+            #  ) 
+            # actions_fake_pred1 = actions_fake_result <= 0.5
+            # actions_fake_accuracy = jnp.mean(actions_fake_pred1 * 1.0)
+            # actions_fake_pred_mean = jnp.mean(actions_fake_result)
+            # actions_fake_pred_max = jnp.max(actions_fake_result)
+            # actions_fake_pred_min = jnp.min(actions_fake_result)
+            # actions_fake_pred_std = jnp.std(actions_fake_result)
+            # actions_fake_pred_median = jnp.median(actions_fake_result)
 
             ### latent action statistics ###
             if self.config.latent_stats_logging:
@@ -305,29 +293,20 @@ class REP(object):
                 key: train_states[key].apply_gradients(grads=grads[i][key])
                 for i, key in enumerate(self.model_keys)
             }
-            # if self.config.sarsa:
-            #     new_target_qf_params = {}
-            #     new_target_qf_params['qf'] = update_target_network(
-            #     new_train_states['qf'].params, target_qf_params['qf'],
-            #     self.config.soft_target_update_rate)
-            # else:
-            #     new_target_qf_params = None
         else:
             new_train_states = copy.deepcopy(train_states)
-            # new_target_qf_params = copy.deepcopy(target_qf_params)
 
         metrics = dict(
             g_loss=aux_values['g_loss'],
             encoder_loss=aux_values['encoder_loss'],
             reconstruct_loss=aux_values['reconstruct_loss'],
             decoder_loss=aux_values['decoder_loss'],
-            # qf_loss=aux_values['qf_loss'],
-            # qf_alpha=aux_values['qf_alpha'],
-            # qf_alpha_loss=aux_values['qf_alpha_loss'],
             random_z_distance=aux_values['random_z_distance'],
             random_a_distance=aux_values['random_a_distance'],
             perturbed_decoder_loss=aux_values['perturbed_reconstruct_loss'],
             discriminator_loss=aux_values['d_loss'],
+            # action_discriminator_loss=aux_values['action_d_loss'],
+            # action_g_loss=aux_values['action_g_loss'],
             real_accuracy=aux_values['real_accuracy'],
             fake_accuracy=aux_values['fake_accuracy'],
             real_pred_mean=aux_values['real_pred_mean'],
@@ -340,6 +319,19 @@ class REP(object):
             fake_pred_std=aux_values['fake_pred_std'],
             real_pred_median=aux_values['real_pred_median'],
             fake_pred_median=aux_values['fake_pred_median'],
+
+            # actions_real_accuracy=aux_values['actions_real_accuracy'],
+            # actions_fake_accuracy=aux_values['actions_fake_accuracy'],
+            # actions_real_pred_mean=aux_values['actions_real_pred_mean'],
+            # actions_fake_pred_mean=aux_values['actions_fake_pred_mean'],
+            # actions_real_pred_min=aux_values['actions_real_pred_min'],
+            # actions_fake_pred_min=aux_values['actions_fake_pred_min'],
+            # actions_real_pred_max=aux_values['actions_real_pred_max'],
+            # actions_fake_pred_max=aux_values['actions_fake_pred_max'],
+            # actions_real_pred_std=aux_values['actions_real_pred_std'],
+            # actions_fake_pred_std=aux_values['actions_fake_pred_std'],
+            # actions_real_pred_median=aux_values['actions_real_pred_median'],
+            # actions_fake_pred_median=aux_values['actions_fake_pred_median'],
         )
 
         if self.config.latent_stats_logging:
@@ -356,8 +348,6 @@ class REP(object):
 
             ), 'latent_actions'))
         return new_train_states, metrics
-
-        # return new_train_states, new_target_qf_params, metrics
 
 
 

@@ -52,6 +52,25 @@ def multiple_action_q_function(forward):
         return q_last_layer, q_values
     return wrapped
 
+
+def multiple_action_encode_function(forward):
+    # Forward the rep function with multiple actions on each state, to be used as a decorator
+    def wrapped(self, rng, observations, actions, **kwargs):
+        multiple_actions = False
+        batch_size = observations.shape[0]
+        if actions.ndim == 3 and observations.ndim == 2:
+            repeat = actions.shape[1]
+            multiple_actions = True
+            observations = extend_and_repeat(observations, 1, actions.shape[1]).reshape(-1, observations.shape[-1])
+            actions = actions.reshape(-1, actions.shape[-1])
+        samples, log_probs = forward(self, rng, observations, actions, **kwargs)
+        if multiple_actions:
+            samples = samples.reshape(batch_size, repeat, -1)
+            log_probs = log_probs.reshape(batch_size, repeat, -1)
+        return samples, log_probs
+    return wrapped
+
+
 def multiple_action_decode_function(forward):
     # Forward the rep function with multiple actions on each state, to be used as a decorator
     def wrapped(self, observations, actions, **kwargs):
@@ -266,6 +285,8 @@ class ActionRepresentationPolicy(nn.Module):
         # return action_distribution.log_prob(latent_actions / self.action_scale)
         return action_distribution.log_prob(latent_actions)
 
+    @nn.compact
+    @multiple_action_encode_function
     def __call__(self, rng, observations, actions, deterministic=False, repeat=None):
         if repeat is not None:
             observations = extend_and_repeat(observations, 1, repeat)

@@ -31,7 +31,7 @@ from viskit.logging import logger, setup_logger
 FLAGS_DEF = define_flags_with_default(
     env='halfcheetah-medium-v2',
     max_traj_length=1000,
-    seed=42,
+    seed=1,
     rep_seed=42,
     save_model=False,
     batch_size=256,
@@ -54,7 +54,7 @@ FLAGS_DEF = define_flags_with_default(
     eval_period=20,
     eval_n_trajs=10,
     
-    train_decorrelation=True,
+    train_decorrelation=False,
     train_bc=True,
     train_cql=True,
     encoder_no_tanh=True,
@@ -64,9 +64,9 @@ FLAGS_DEF = define_flags_with_default(
     encoder_arch='256-256-256-256',
     decoder_arch='256-256-256',
     decorrelation_method='GAN',
-    decorrelation_epochs=500, 
+    decorrelation_epochs=5, 
     decor_n_train_step_per_epoch=1000,
-    policy_n_epochs=100,
+    policy_n_epochs=10,
     policy_n_train_step_per_epoch=500,
     latent_dim=2.0,
     dis_dropout=False,
@@ -105,17 +105,9 @@ def main(argv):
     
 
     dataset = get_d4rl_dataset(eval_sampler.env)
-    # dataset = get_preprocessed_dataset(eval_sampler.env, latent_action_dim)
     dataset['rewards'] = dataset['rewards'] * FLAGS.reward_scale + FLAGS.reward_bias
     dataset['actions'] = np.clip(dataset['actions'], -FLAGS.clip_action, FLAGS.clip_action)
 
-    # if FLAGS.bc_filter_success:
-    #     top_dataset = get_top_dataset(dataset)
-    # else:
-    #     top_dataset = get_top_dataset(dataset, filter_success=False, percentile=FLAGS.bc_filter_percentile)
-
-    # sarsa_dataset = get_sarsa_dataset(eval_sampler.env)
-    # train_dataset, val_dataset = random_split(sarsa_dataset, 0.9, seed=FLAGS.seed)
 
     """
     Decorrelation Training
@@ -136,7 +128,13 @@ def main(argv):
     discriminator = Discriminator(
         observation_dim, 
         latent_action_dim,
-        # action_dim,
+        FLAGS.discriminator_arch,
+        FLAGS.dis_dropout,
+    )
+
+    action_discriminator = Discriminator(
+        observation_dim, 
+        action_dim,
         FLAGS.discriminator_arch,
         FLAGS.dis_dropout,
     )
@@ -159,9 +157,8 @@ def main(argv):
         )
 
 
-    rep_qf = FullyConnectedQFunction(observation_dim, action_dim, FLAGS.qf_arch, FLAGS.orthogonal_init)
 
-    rep = REP(FLAGS.rep, encoder, discriminator, decoder, rep_qf, method=FLAGS.decorrelation_method)
+    rep = REP(FLAGS.rep, encoder, discriminator, decoder, action_discriminator, method=FLAGS.decorrelation_method)
 
     if FLAGS.train_decorrelation:
         viskit_metrics = {}
@@ -184,13 +181,13 @@ def main(argv):
             logger.record_dict(metrics)
             logger.dump_tabular(with_prefix=False, with_timestamp=False)
 
-        filename = '-'.join([FLAGS.env, str(FLAGS.seed), str(rep.config.recon_alpha), str(rep.config.z_alpha)]) + '.pkl' 
+        filename = '-'.join([FLAGS.env, str(FLAGS.seed), str(rep.config.recon_alpha), str(rep.config.z_alpha), str(FLAGS.rep_batch_size), str(FLAGS.decorrelation_epochs)]) + '.pkl' 
 
         with open(os.path.join(model_dir, filename), 'wb') as fout:
             rep_data = {'rep': rep, 'variant': variant, 'epoch': epoch}
             pickle.dump(rep_data, fout)
     else:
-        filename = '-'.join([FLAGS.env, str(FLAGS.rep_seed), str(rep.config.recon_alpha), str(rep.config.z_alpha)]) + '.pkl' 
+        filename = '-'.join([FLAGS.env, str(FLAGS.rep_seed), str(rep.config.recon_alpha), str(rep.config.z_alpha), str(FLAGS.rep_batch_size), str(FLAGS.decorrelation_epochs)]) + '.pkl' 
 
         with open(os.path.join(model_dir, filename), 'rb') as fin:
             rep_data = pickle.load(fin)

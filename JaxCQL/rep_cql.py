@@ -31,7 +31,7 @@ class REPCQL(object):
         config.policy_lr = 2e-4
         config.qf_lr = 3e-4
         config.optimizer_type = 'adam'
-        config.reg_type = 'dr3'
+        config.reg_type = 'none'
         config.soft_target_update_rate = 5e-3
         config.use_cql = True
         config.cql_n_actions = 10
@@ -40,7 +40,7 @@ class REPCQL(object):
         config.cql_target_action_gap = 1.0
         config.cql_temp = 1.0
         config.cql_min_q_weight = 0.0
-        config.cql_max_target_backup = False 
+        config.cql_max_target_backup = True 
         config.cql_clip_diff_min = -np.inf
         config.cql_clip_diff_max = np.inf
         config.epsilon = 1e-4
@@ -241,10 +241,15 @@ class REPCQL(object):
                         train_params['policy'], split_rng, next_observations, repeat=self.config.cql_n_actions
                     )
                     new_next_actions = self.decoder.apply(self.rep.train_params['decoder'], next_observations, new_next_actions_rep)
+                    q1_next_pred_lastlayer, q1_next_actions = self.qf.apply(train_params['qf1'], next_observations, new_next_actions)
+                    q2_next_pred_lastlayer, q2_next_actions = self.qf.apply(train_params['qf2'], next_observations, new_next_actions)
                     target_q_values = jnp.minimum(
-                        self.qf.apply(target_qf_params['qf1'], next_observations, new_next_actions),
-                        self.qf.apply(target_qf_params['qf2'], next_observations, new_next_actions),
-                    )
+                        q1_next_actions, q2_next_actions,
+                    ) 
+                    # target_q_values = jnp.minimum(
+                    #     self.qf.apply(target_qf_params['qf1'], next_observations, new_next_actions),
+                    #     self.qf.apply(target_qf_params['qf2'], next_observations, new_next_actions),
+                    # )
                 else:
                     new_next_actions_rep, next_log_pi = self.policy.apply(
                         train_params['policy'], split_rng, next_observations, repeat=self.config.cql_n_actions
@@ -282,6 +287,11 @@ class REPCQL(object):
                         self.qf.apply(target_qf_params['qf1'], next_observations, new_next_actions_rep),
                         self.qf.apply(target_qf_params['qf2'], next_observations, new_next_actions_rep),
                     )
+            
+            # log decoder quality
+            rng, split_rng = jax.random.split(rng) 
+            encoded_new_next_action, _ = self.encoder.apply(self.rep.train_params['encoder'], split_rng, next_observations, new_next_actions)
+            next_action_l2 = mse_loss(encoded_new_next_action, new_next_actions_rep)
 
             target_q_values = jnp.clip(
                 target_q_values,
@@ -294,12 +304,16 @@ class REPCQL(object):
             td_target = jax.lax.stop_gradient(
                 rewards + (1. - dones) * self.config.discount * target_q_values
             )
+
             if self.config.reg_type == 'dr3':
                 qf1_loss = mse_loss(q1_pred, td_target) + self.config.norm_weight * jnp.mean(jnp.sum(q1_pred_lastlayer * q1_next_pred_lastlayer, axis=-1))
                 qf2_loss = mse_loss(q2_pred, td_target) + self.config.norm_weight * jnp.mean(jnp.sum(q2_pred_lastlayer * q2_next_pred_lastlayer, axis=-1))
-            else:
+            elif self.config.reg_type == 'norm':
                 qf1_loss = mse_loss(q1_pred, td_target) + self.config.norm_weight * jnp.mean(jnp.sum(q1_pred_lastlayer * q1_pred_lastlayer, axis=-1))
                 qf2_loss = mse_loss(q2_pred, td_target) + self.config.norm_weight * jnp.mean(jnp.sum(q2_pred_lastlayer * q2_pred_lastlayer, axis=-1))
+            else:
+                qf1_loss = mse_loss(q1_pred, td_target)
+                qf2_loss = mse_loss(q2_pred, td_target)
 
             ### CQL
             if self.config.use_cql:
@@ -457,6 +471,7 @@ class REPCQL(object):
             average_qf1=aux_values['q1_pred'].mean(),
             average_qf2=aux_values['q2_pred'].mean(),
             average_target_q=aux_values['target_q_values'].mean(),
+            next_action_l2=aux_values['next_action_l2'].mean(),
             # train_action_l2=aux_values['train_action_l2'].mean(),
             # decoded_action_l2=aux_values['decoded_action_l2'].mean(),
         )
