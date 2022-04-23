@@ -25,7 +25,7 @@ class BC(object):
         config = ConfigDict()
         config.policy_lr = 3e-4
         config.optimizer_type = 'adam'
-        config.alpha_multiplier = 1.0
+        config.alpha_multiplier = 0.0
         config.use_automatic_entropy_tuning = True
         config.target_entropy = 0.0
 
@@ -114,7 +114,7 @@ class BC(object):
 
         metrics = dict(
             policy_loss=aux_values['policy_loss'],
-            negative_log_probs=-aux_values['negative_log_probs'],
+            negative_log_probs=aux_values['negative_log_probs'],
             alpha_loss=aux_values['alpha_loss'],
             alpha=aux_values['alpha'],
         )
@@ -125,7 +125,7 @@ class BC(object):
     def log_likelihood(self, observations, actions):
         actions = jnp.clip(actions, -1 + 1e-5, 1 - 1e-5)
         log_prob = self.policy.apply(self.train_params['policy'], observations, actions, method=self.policy.log_prob)
-        return -log_prob.mean()
+        return log_prob.mean()
 
 
     @property

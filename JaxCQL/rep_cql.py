@@ -45,7 +45,7 @@ class REPCQL(object):
         config.cql_clip_diff_max = np.inf
         config.epsilon = 1e-4
         config.original_q = True
-        config.distance_logging = False
+        config.distance_logging = True
         config.q_value_clip_min = -1000.0
         config.q_value_clip_max = 1000.0
         config.deterministic_action= False
@@ -168,7 +168,7 @@ class REPCQL(object):
 
             if self.config.distance_logging:
                 latent_dis_accuracy = self.discriminator.apply(self.rep.train_params['discriminator'], observations, new_actions_rep).mean()
-                bc_log_prob = self.bc_agent.log_likelihood(observations, actions)
+                bc_log_prob = self.bc_agent.log_likelihood(observations, new_actions)
                 
                 rng, split_rng = jax.random.split(rng)
                 actions_rep, _ = self.encoder.apply(self.rep.train_params['encoder'], split_rng, observations, actions)

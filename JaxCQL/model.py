@@ -198,6 +198,53 @@ class FullyConnectedQFunction(nn.Module):
         return last_layer_x, jnp.squeeze(x, -1)
 
 
+class FullyConnectedActionQFunction(nn.Module):
+    observation_dim: int
+    action_dim: int
+    output_dim: int = 1
+    arch: str = '256-256'
+    orthogonal_init: bool = False
+    normalize: bool = False
+
+    @nn.compact
+    @multiple_action_q_function
+    def __call__(self, observations, actions):
+        x = jnp.concatenate([observations, actions], axis=-1)
+        batch, _ = jnp.shape(x)
+        hidden_sizes = [int(h) for h in self.arch.split('-')]
+        for h in hidden_sizes:
+            if self.orthogonal_init:
+                x = nn.Dense(
+                    h,
+                    kernel_init=jax.nn.initializers.orthogonal(jnp.sqrt(2.0)),
+                    bias_init=jax.nn.initializers.zeros
+                )(x)
+            else:
+                x = nn.Dense(h)(jnp.concatenate([x, actions], axis=-1))
+            x = nn.relu(x)
+        
+        if self.normalize:
+            normalized = jnp.reshape(jnp.sqrt(jnp.sum(x**2, axis=-1) + 1e-6), (batch,1))
+            x = x / normalized
+
+        if self.orthogonal_init:
+            output = nn.Dense(
+                self.output_dim,
+                kernel_init=jax.nn.initializers.orthogonal(1e-2),
+                bias_init=jax.nn.initializers.zeros
+            )(jnp.concatenate([x, actions], axis=-1))
+        else:
+            output = nn.Dense(
+                self.output_dim,
+                kernel_init=jax.nn.initializers.variance_scaling(
+                    1e-2, 'fan_in', 'uniform'
+                ),
+                bias_init=jax.nn.initializers.zeros
+            )(jnp.concatenate([x, actions], axis=-1))
+        return x, jnp.squeeze(output, -1)
+
+
+
 class TanhGaussianPolicy(nn.Module):
     observation_dim: int
     action_dim: int

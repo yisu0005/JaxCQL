@@ -21,7 +21,7 @@ from .rep import REP
 from .bc_policy import BC
 from .replay_buffer import get_d4rl_dataset, get_preprocessed_dataset, subsample_batch, get_top_dataset, get_sarsa_dataset, get_preprocessed_dataset
 from .jax_utils import batch_to_jax, next_rng
-from .model import TanhGaussianPolicy, FullyConnectedQFunction, FullyConnectedQFunction, SamplerPolicy, SamplerDecoder, SamplerEncoder, Discriminator, ActionDecoder, ActionSeperatedDecoder, ActionRepresentationPolicy
+from .model import TanhGaussianPolicy, FullyConnectedQFunction, FullyConnectedQFunction, FullyConnectedActionQFunction, SamplerPolicy, SamplerDecoder, SamplerEncoder, Discriminator, ActionDecoder, ActionSeperatedDecoder, ActionRepresentationPolicy
 from .sampler import StepSampler, TrajSampler
 from .utils import Timer, define_flags_with_default, set_random_seed, print_flags, get_user_flags, prefix_metrics
 from .utils import WandBLogger, random_split
@@ -47,6 +47,8 @@ FLAGS_DEF = define_flags_with_default(
     policy_log_std_multiplier=1.0,
     policy_log_std_offset=-1.0,
     policy_entropy_scale=2.0, 
+    qf_normalize=False,
+    qf_seperate_action=True,
 
     n_epochs=2000,
     bc_epochs=0,
@@ -54,7 +56,7 @@ FLAGS_DEF = define_flags_with_default(
     eval_period=20,
     eval_n_trajs=10,
     
-    train_decorrelation=False,
+    train_decorrelation=True,
     train_bc=True,
     train_cql=True,
     encoder_no_tanh=True,
@@ -64,9 +66,9 @@ FLAGS_DEF = define_flags_with_default(
     encoder_arch='256-256-256-256',
     decoder_arch='256-256-256',
     decorrelation_method='GAN',
-    decorrelation_epochs=5, 
+    decorrelation_epochs=500, 
     decor_n_train_step_per_epoch=1000,
-    policy_n_epochs=10,
+    policy_n_epochs=100,
     policy_n_train_step_per_epoch=500,
     latent_dim=2.0,
     dis_dropout=False,
@@ -285,7 +287,12 @@ def main(argv):
             FLAGS.policy_log_std_multiplier, FLAGS.policy_log_std_offset, FLAGS.action_scale
         )
 
-        qf = FullyConnectedQFunction(observation_dim, action_dim, FLAGS.qf_arch, FLAGS.orthogonal_init)
+        # qf = FullyConnectedQFunction(observation_dim, action_dim, FLAGS.qf_arch, FLAGS.orthogonal_init)
+        if FLAGS.qf_seperate_action:
+            qf = FullyConnectedActionQFunction(observation_dim, action_dim, 1, FLAGS.qf_arch, FLAGS.orthogonal_init, FLAGS.qf_normalize)
+        else:
+            qf = FullyConnectedQFunction(observation_dim, action_dim, FLAGS.qf_arch, FLAGS.orthogonal_init)
+
 
         if FLAGS.cql.target_entropy >= 0.0:
             FLAGS.cql.target_entropy = -(np.prod(eval_sampler.env.action_space.shape) * FLAGS.policy_entropy_scale).item()

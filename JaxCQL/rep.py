@@ -29,6 +29,8 @@ class REP(object):
         config.dis_lr = 3e-4
         config.decoder_lr = 3e-4
         config.optimizer_type = 'adam'
+        config.decoder_optimizer_type = 'adamw'
+        config.encoder_optimizer_type = 'adam'
         config.optimizer_b1 = 0.5 
         config.optimizer_b2 = 0.999
         config.recon_alpha = 0.01
@@ -41,6 +43,8 @@ class REP(object):
         config.discount = 0.99
         config.soft_target_update_rate = 5e-3
         config.action_dis_alpha = 1.0
+        config.encoder_wd = 0.0
+        config.decoder_wd = 0.2
 
         if updates is not None:
             config.update(ConfigDict(updates).copy_and_resolve_references())
@@ -63,7 +67,22 @@ class REP(object):
         optimizer_class = {
             'adam': optax.adam,
             'sgd': optax.sgd,
+            'adamw': optax.adamw,
         }[self.config.optimizer_type]
+
+        decoder_optimizer_class = {
+            'adam': optax.adam,
+            'sgd': optax.sgd,
+            'adamw': optax.adamw,
+        }[self.config.decoder_optimizer_type]
+
+        encoder_optimizer_class = {
+            'adam': optax.adam,
+            'sgd': optax.sgd,
+            'adamw': optax.adamw,
+        }[self.config.encoder_optimizer_type]
+
+        
 
         discriminator_params = self.discriminator.init(next_rng(), jnp.zeros((10, self.observation_dim)), jnp.zeros((10, self.latent_ac_dim)))
         self._train_states['discriminator'] = TrainState.create(
@@ -82,14 +101,14 @@ class REP(object):
         decoder_params = self.decoder.init(next_rng(), jnp.zeros((10, self.observation_dim)), jnp.zeros((10, self.latent_ac_dim)))
         self._train_states['decoder'] = TrainState.create(
             params=decoder_params,
-            tx=optimizer_class(self.config.decoder_lr),
+            tx=decoder_optimizer_class(self.config.decoder_lr, weight_decay=self.config.decoder_wd),
             apply_fn=None,
         )
 
         encoder_params = self.encoder.init(next_rng(), next_rng(), jnp.zeros((10, self.observation_dim)), jnp.zeros((10, self.action_dim)))
         self._train_states['encoder'] = TrainState.create(
             params=encoder_params,
-            tx=optimizer_class(self.config.encoder_lr),
+            tx=encoder_optimizer_class(self.config.encoder_lr),
             apply_fn=None,
         )
 
