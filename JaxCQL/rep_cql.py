@@ -207,8 +207,7 @@ class REPCQL(object):
                         self.qf.apply(train_params['qf1'], observations, new_actions_rep),
                         self.qf.apply(train_params['qf2'], observations, new_actions_rep),
                     )
-
-            policy_loss = (alpha*log_pi - q_new_actions).mean()
+                policy_loss = (alpha*log_pi - q_new_actions).mean()
             loss_collection['policy'] = policy_loss
 
             """ Q function loss """

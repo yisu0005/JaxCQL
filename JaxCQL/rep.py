@@ -29,7 +29,7 @@ class REP(object):
         config.dis_lr = 3e-4
         config.decoder_lr = 3e-4
         config.optimizer_type = 'adam'
-        config.decoder_optimizer_type = 'adamw'
+        config.decoder_optimizer_type = 'adam'
         config.encoder_optimizer_type = 'adam'
         config.optimizer_b1 = 0.5 
         config.optimizer_b2 = 0.999
@@ -45,6 +45,7 @@ class REP(object):
         config.action_dis_alpha = 1.0
         config.encoder_wd = 0.0
         config.decoder_wd = 0.2
+        config.grad_penalty = 1.0
 
         if updates is not None:
             config.update(ConfigDict(updates).copy_and_resolve_references())
@@ -98,17 +99,27 @@ class REP(object):
         #     apply_fn=None,
         # )
 
-        decoder_params = self.decoder.init(next_rng(), jnp.zeros((10, self.observation_dim)), jnp.zeros((10, self.latent_ac_dim)))
-        self._train_states['decoder'] = TrainState.create(
-            params=decoder_params,
-            tx=decoder_optimizer_class(self.config.decoder_lr, weight_decay=self.config.decoder_wd),
-            apply_fn=None,
-        )
+        if self.config.decoder_optimizer_type == 'adamw':
+            decoder_params = self.decoder.init(next_rng(), jnp.zeros((10, self.observation_dim)), jnp.zeros((10, self.latent_ac_dim)))
+            self._train_states['decoder'] = TrainState.create(
+                params=decoder_params,
+                tx=decoder_optimizer_class(self.config.decoder_lr, weight_decay=self.config.decoder_wd),
+                apply_fn=None,
+            )
+        else:
+            decoder_params = self.decoder.init(next_rng(), jnp.zeros((10, self.observation_dim)), jnp.zeros((10, self.latent_ac_dim)))
+            self._train_states['decoder'] = TrainState.create(
+                params=decoder_params,
+                # tx=decoder_optimizer_class(self.config.decoder_lr),
+                tx=decoder_optimizer_class(self.config.decoder_lr, b1=self.config.optimizer_b1, b2=self.config.optimizer_b2),
+                apply_fn=None,
+            )
 
         encoder_params = self.encoder.init(next_rng(), next_rng(), jnp.zeros((10, self.observation_dim)), jnp.zeros((10, self.action_dim)))
         self._train_states['encoder'] = TrainState.create(
             params=encoder_params,
-            tx=encoder_optimizer_class(self.config.encoder_lr),
+            # tx=decoder_optimizer_class(self.config.decoder_lr),
+            tx=encoder_optimizer_class(self.config.encoder_lr, b1=self.config.optimizer_b1, b2=self.config.optimizer_b2),
             apply_fn=None,
         )
 
@@ -225,7 +236,13 @@ class REP(object):
             
             # decoder_loss = perturbed_reconstruct_loss + self.config.decoder_z_alpha * random_z_distance + self.config.decoder_z_alpha * random_a_distance + self.config.action_dis_alpha * action_g_loss
             decoder_loss = perturbed_reconstruct_loss + self.config.decoder_z_alpha * random_z_distance + self.config.decoder_z_alpha * random_a_distance
-            loss_collection['decoder'] = decoder_loss
+            dfdx_decoder = jax.grad(self.decoder_forward, argnums=2)
+            gradients = dfdx_decoder(train_params['decoder'], observations, latent_actions)
+            gradients = gradients.reshape((gradients.shape[0], -1))
+            grad_norm = jnp.linalg.norm(gradients, axis=1)
+            grad_penalty = ((grad_norm - 1) ** 2).mean()
+
+            loss_collection['decoder'] = decoder_loss + self.config.grad_penalty * grad_penalty
 
             if self.config.smooth_dis:
                 rng, split_rng = jax.random.split(rng)
@@ -324,6 +341,7 @@ class REP(object):
             random_a_distance=aux_values['random_a_distance'],
             perturbed_decoder_loss=aux_values['perturbed_reconstruct_loss'],
             discriminator_loss=aux_values['d_loss'],
+            grad_penalty=aux_values['grad_penalty'],
             # action_discriminator_loss=aux_values['action_d_loss'],
             # action_g_loss=aux_values['action_g_loss'],
             real_accuracy=aux_values['real_accuracy'],
@@ -385,4 +403,9 @@ class REP(object):
     @property
     def total_steps(self):
         return self._total_steps
+
+    def decoder_forward(self, params, observations, latent_actions):
+        """Helper function to calculate the gradients with respect to the input."""
+        value = self.decoder.apply(params, observations, latent_actions)
+        return jnp.sum(value)
 

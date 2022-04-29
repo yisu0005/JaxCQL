@@ -25,7 +25,7 @@ class DECQL(object):
         config = ConfigDict()
         config.discount = 0.99
         config.alpha_multiplier = 1.0
-        config.gloss_alpha_multiplier = 1.0
+        config.gloss_alpha_multiplier = 10.0
         config.use_automatic_entropy_tuning = True
         config.use_automatic_gloss_tuning = False
         config.backup_entropy = False
@@ -33,13 +33,10 @@ class DECQL(object):
         config.target_gloss = 0.6
         config.policy_lr = 3e-4
         config.qf_lr = 3e-4
-        config.prior = 'uniform'
         config.encoder_lr = 3e-4
-        config.decoder_lr = 3e-4
         config.dis_lr = 3e-4
-        config.recon_alpha = 0.01
-        config.gloss_alpha = 1000.0
-        config.optimizer_b1 = 0.9
+        config.gloss_alpha = 0.1
+        config.optimizer_b1 = 0.5
         config.optimizer_b2 = 0.999
         config.optimizer_type = 'adam'
         config.soft_target_update_rate = 5e-3
@@ -50,7 +47,7 @@ class DECQL(object):
         config.cql_target_action_gap = 1.0
         config.cql_temp = 1.0
         config.cql_min_q_weight = 0.0
-        config.cql_max_target_backup = True 
+        config.cql_max_target_backup = False 
         config.cql_clip_diff_min = -np.inf
         config.cql_clip_diff_max = np.inf
         config.epsilon = 1e-4
@@ -67,12 +64,11 @@ class DECQL(object):
             config.update(ConfigDict(updates).copy_and_resolve_references())
         return config
 
-    def __init__(self, config, policy, qf, encoder, decoder, discriminator, bc_agent):
+    def __init__(self, config, policy, qf, encoder, discriminator, bc_agent):
         self.config = self.get_default_config(config)
         self.policy = policy
         self.qf = qf
         self.encoder = encoder
-        self.decoder = decoder
         self.discriminator = discriminator
         self.observation_dim = policy.observation_dim
         self.action_dim = encoder.action_dim
@@ -104,50 +100,30 @@ class DECQL(object):
             apply_fn=None,
         )
 
-        decoder_params = self.decoder.init(next_rng(), jnp.zeros((10, self.observation_dim)), jnp.zeros((10, self.latent_action_dim)))
-        self._train_states['decoder'] = TrainState.create(
-            params=decoder_params,
-            tx=optimizer_class(self.config.decoder_lr),
-            apply_fn=None,
-        )
-
         encoder_params = self.encoder.init(next_rng(), next_rng(), jnp.zeros((10, self.observation_dim)), jnp.zeros((10, self.action_dim)))
         self._train_states['encoder'] = TrainState.create(
             params=encoder_params,
-            tx=optimizer_class(self.config.encoder_lr),
+            tx=optimizer_class(self.config.encoder_lr, b1=self.config.optimizer_b1, b2=config.optimizer_b2),
             apply_fn=None,
         )
 
-        if self.config.original_q:
-            qf1_params = self.qf.init(next_rng(), jnp.zeros((10, self.observation_dim)), jnp.zeros((10, self.action_dim)))
-            self._train_states['qf1'] = TrainState.create(
-                params=qf1_params,
-                tx=optimizer_class(self.config.qf_lr),
-                apply_fn=None,
-            )
-            qf2_params = self.qf.init(next_rng(), jnp.zeros((10, self.observation_dim)), jnp.zeros((10, self.action_dim)))
-            self._train_states['qf2'] = TrainState.create(
-                params=qf2_params,
-                tx=optimizer_class(self.config.qf_lr),
-                apply_fn=None,
-            )
-        else:
-            qf1_params = self.qf.init(next_rng(), jnp.zeros((10, self.observation_dim)), jnp.zeros((10, self.latent_action_dim)))
-            self._train_states['qf1'] = TrainState.create(
-                params=qf1_params,
-                tx=optimizer_class(self.config.qf_lr),
-                apply_fn=None,
-            )
-            qf2_params = self.qf.init(next_rng(), jnp.zeros((10, self.observation_dim)), jnp.zeros((10, self.latent_action_dim)))
-            self._train_states['qf2'] = TrainState.create(
-                params=qf2_params,
-                tx=optimizer_class(self.config.qf_lr),
-                apply_fn=None,
-            )
+
+        qf1_params = self.qf.init(next_rng(), jnp.zeros((10, self.observation_dim)), jnp.zeros((10, self.latent_action_dim)))
+        self._train_states['qf1'] = TrainState.create(
+            params=qf1_params,
+            tx=optimizer_class(self.config.qf_lr),
+            apply_fn=None,
+        )
+        qf2_params = self.qf.init(next_rng(), jnp.zeros((10, self.observation_dim)), jnp.zeros((10, self.latent_action_dim)))
+        self._train_states['qf2'] = TrainState.create(
+            params=qf2_params,
+            tx=optimizer_class(self.config.qf_lr),
+            apply_fn=None,
+        )
 
         self._target_qf_params = deepcopy({'qf1': qf1_params, 'qf2': qf2_params})
 
-        model_keys = ['policy', 'qf1', 'qf2', 'discriminator', 'encoder', 'decoder']
+        model_keys = ['policy', 'qf1', 'qf2', 'discriminator', 'encoder']
 
         if self.config.use_automatic_entropy_tuning:
             self.log_alpha = Scalar(0.0)
@@ -181,15 +157,15 @@ class DECQL(object):
         self._model_keys = tuple(model_keys)
         self._total_steps = 0
 
-    def train(self, batch, bc=False, decorrelation=True):
+    def train(self, batch, bc=False):
         self._total_steps += 1
         self._train_states, self._target_qf_params, metrics = self._train_step(
-            self._train_states, self._target_qf_params, next_rng(), batch, bc, self.config.original_q, decorrelation
+            self._train_states, self._target_qf_params, next_rng(), batch, bc
         )
         return metrics
 
-    @partial(jax.jit, static_argnames=('self', 'bc', 'original_q', 'decorrelation'))
-    def _train_step(self, train_states, target_qf_params, rng, batch, bc=False, original_q=True, decorrelation=True):
+    @partial(jax.jit, static_argnames=('self', 'bc', 'original_q'))
+    def _train_step(self, train_states, target_qf_params, rng, batch, bc=False):
 
         def loss_fn(train_params, rng):
             observations = batch['observations']
@@ -203,18 +179,13 @@ class DECQL(object):
             loss_collection = {}
 
             rng, split_rng = jax.random.split(rng)
-            new_actions_rep, log_pi = self.policy.apply(train_params['policy'], split_rng, observations, deterministic=self.config.deterministic_action)
-            new_actions = self.decoder.apply(train_params['decoder'], observations, new_actions_rep)
+            new_actions, log_pi = self.policy.apply(train_params['policy'], split_rng, observations, deterministic=self.config.deterministic_action)
+            rng, split_rng = jax.random.split(rng)
+            new_actions_rep, _ = self.encoder.apply(train_params['encoder'], split_rng, observations, new_actions)
 
             if self.config.distance_logging:
-                latent_dis_accuracy = self.discriminator.apply(train_params['discriminator'], observations, new_actions_rep).mean()
-                bc_log_prob = self.bc_agent.log_likelihood(observations, actions)
-                
-                rng, split_rng = jax.random.split(rng)
-                actions_rep, _ = self.encoder.apply(train_params['encoder'], split_rng, observations, actions)
-                actions_rep = jnp.clip(actions_rep, -1.0 * self.latent_scale + self.config.epsilon, 1.0 * self.latent_scale - self.config.epsilon) 
-                dataset_log_prob = -self.policy.apply(train_params['policy'], observations, actions_rep, method=self.policy.log_prob).mean()
-
+                bc_log_prob = self.bc_agent.log_likelihood(observations, new_actions)
+              
 
             if self.config.use_automatic_entropy_tuning:
                 alpha_loss = -self.log_alpha.apply(train_params['log_alpha']) * (log_pi + self.config.target_entropy).mean()
@@ -226,35 +197,23 @@ class DECQL(object):
 
             """ Policy loss """
             if bc:
-                rng, split_rng = jax.random.split(rng)
-                actions_rep, _ = self.encoder.apply(train_params['encoder'], split_rng, observations, actions) 
-                actions_rep = jnp.clip(actions_rep, -1 * self.latent_scale + self.config.epsilon, self.latent_scale - self.config.epsilon)
-                log_probs = self.policy.apply(train_params['policy'], observations, actions_rep, method=self.policy.log_prob)
+                log_probs = self.policy.apply(train_params['policy'], observations, actions, method=self.policy.log_prob)
                 policy_loss = (alpha*log_pi - log_probs).mean()
             else:
-                if original_q:
-                    q_new_actions = jnp.minimum(
-                        self.qf.apply(train_params['qf1'], observations, new_actions),
-                        self.qf.apply(train_params['qf2'], observations, new_actions),
-                    )
-                else:
-                    q_new_actions = jnp.minimum(
-                        self.qf.apply(train_params['qf1'], observations, new_actions_rep),
-                        self.qf.apply(train_params['qf2'], observations, new_actions_rep),
-                    )
+                q_new_actions = jnp.minimum(
+                    self.qf.apply(train_params['qf1'], observations, new_actions_rep)[1],
+                    self.qf.apply(train_params['qf2'], observations, new_actions_rep)[1],
+                )
+                policy_loss = (alpha*log_pi - q_new_actions).mean()
 
-            policy_loss = (alpha*log_pi - q_new_actions).mean()
             loss_collection['policy'] = policy_loss
 
             """ Q function loss """
-            if original_q:
-                q1_pred = self.qf.apply(train_params['qf1'], observations, actions)
-                q2_pred = self.qf.apply(train_params['qf2'], observations, actions)
-            else:
-                actions_rep, _ = self.encoder.apply(train_params['encoder'], split_rng, observations, actions) 
-                actions_rep = jnp.clip(actions_rep, -1 * self.latent_scale + self.config.epsilon, 1 * self.latent_scale - self.config.epsilon)
-                q1_pred = self.qf.apply(train_params['qf1'],observations, actions_rep)
-                q2_pred = self.qf.apply(train_params['qf2'],observations, actions_rep)
+            rng, split_rng = jax.random.split(rng) 
+            actions_rep, _ = self.encoder.apply(train_params['encoder'], split_rng, observations, actions) 
+            actions_rep = jnp.clip(actions_rep, -1 * self.latent_scale + self.config.epsilon, 1 * self.latent_scale - self.config.epsilon)
+            q1_pred = self.qf.apply(train_params['qf1'], observations, actions_rep)[1]
+            q2_pred = self.qf.apply(train_params['qf2'], observations, actions_rep)[1]
             
             q1_pred = jnp.clip(
                 q1_pred,
@@ -270,46 +229,30 @@ class DECQL(object):
 
             rng, split_rng = jax.random.split(rng)
             if self.config.cql_max_target_backup:
-                if original_q:
-                    new_next_actions_rep, next_log_pi = self.policy.apply(
-                        train_params['policy'], split_rng, next_observations, repeat=self.config.cql_n_actions
-                    )
-                    new_next_actions = self.decoder.apply(train_params['decoder'], next_observations, new_next_actions_rep)
-                    target_q_values = jnp.minimum(
-                        self.qf.apply(target_qf_params['qf1'], next_observations, new_next_actions),
-                        self.qf.apply(target_qf_params['qf2'], next_observations, new_next_actions),
-                    )
-                else:
-                    new_next_actions_rep, next_log_pi = self.policy.apply(
-                        train_params['policy'], split_rng, next_observations, repeat=self.config.cql_n_actions
-                    )
-                    target_q_values = jnp.minimum(
-                        self.qf.apply(target_qf_params['qf1'], next_observations, new_next_actions_rep),
-                        self.qf.apply(target_qf_params['qf2'], next_observations, new_next_actions_rep),
-                    )
+                new_next_actions, next_log_pi = self.policy.apply(
+                    train_params['policy'], split_rng, next_observations, repeat=self.config.cql_n_actions
+                )
+                rng, split_rng = jax.random.split(rng)
+                new_next_actions_rep, _ = self.encoder.apply(train_params['encoder'], split_rng, next_observations, new_next_actions)
+                target_q_values = jnp.minimum(
+                    self.qf.apply(target_qf_params['qf1'], next_observations, new_next_actions_rep)[1],
+                    self.qf.apply(target_qf_params['qf2'], next_observations, new_next_actions_rep)[1],
+                )
 
                 max_target_indices = jnp.expand_dims(jnp.argmax(target_q_values, axis=-1), axis=-1)
                 target_q_values = jnp.take_along_axis(target_q_values, max_target_indices, axis=-1).squeeze(-1)
                 next_log_pi = jnp.take_along_axis(next_log_pi, max_target_indices, axis=-1).squeeze(-1)
                     
             else:
-                if original_q:
-                    new_next_actions_rep, next_log_pi = self.policy.apply(
-                        train_params['policy'], split_rng, next_observations, deterministic=self.config.deterministic_action,
-                    )
-                    new_next_actions = self.decoder.apply(train_params['decoder'], next_observations, new_next_actions_rep)
-                    target_q_values = jnp.minimum(
-                        self.qf.apply(target_qf_params['qf1'], next_observations, new_next_actions),
-                        self.qf.apply(target_qf_params['qf2'], next_observations, new_next_actions),
-                    )
-                else:
-                    new_next_actions_rep, next_log_pi = self.policy.apply(
-                        train_params['policy'], split_rng, next_observations, deterministic=self.config.deterministic_action,
-                    )
-                    target_q_values = jnp.minimum(
-                        self.qf.apply(target_qf_params['qf1'], next_observations, new_next_actions_rep),
-                        self.qf.apply(target_qf_params['qf2'], next_observations, new_next_actions_rep),
-                    )
+                new_next_actions, next_log_pi = self.policy.apply(
+                    train_params['policy'], split_rng, next_observations, deterministic=self.config.deterministic_action,
+                )
+                rng, split_rng = jax.random.split(rng)
+                new_next_actions_rep, _ = self.encoder.apply(train_params['encoder'], split_rng, next_observations, new_next_actions)
+                target_q_values = jnp.minimum(
+                    self.qf.apply(target_qf_params['qf1'], next_observations, new_next_actions_rep)[1],
+                    self.qf.apply(target_qf_params['qf2'], next_observations, new_next_actions_rep)[1],
+                )
 
             target_q_values = jnp.clip(
                 target_q_values,
@@ -322,58 +265,36 @@ class DECQL(object):
             td_target = jax.lax.stop_gradient(
                 rewards + (1. - dones) * self.config.discount * target_q_values
             )
-            qf1_loss = mse_loss(q1_pred, td_target)
+            qf1_loss = mse_loss(q1_pred, td_target) 
             qf2_loss = mse_loss(q2_pred, td_target)
 
             ### CQL
             if self.config.use_cql:
-                if original_q:
-                    rng, split_rng = jax.random.split(rng)
-                    cql_random_actions = jax.random.uniform(
-                        split_rng, shape=(batch_size, self.config.cql_n_actions, self.action_dim),
-                        minval=-1.0, maxval=1.0
-                    )
+                rng, split_rng = jax.random.split(rng)
+                cql_random_actions = jax.random.uniform(
+                    split_rng, shape=(batch_size, self.config.cql_n_actions, self.latent_action_dim),
+                    minval=-self.latent_scale, maxval=self.latent_scale
+                )
 
-                    rng, split_rng = jax.random.split(rng)
-                    cql_current_actions_rep, cql_current_log_pis = self.policy.apply(
-                        train_params['policy'], split_rng, observations, repeat=self.config.cql_n_actions
-                    )
-                    cql_current_actions = self.decoder.apply(train_params['decoder'], observations, cql_current_actions_rep)
+                cql_current_actions, cql_current_log_pis = self.policy.apply(
+                    train_params['policy'], split_rng, observations, repeat=self.config.cql_n_actions
+                )
+                rng, split_rng = jax.random.split(rng)
+                cql_current_actions_rep, _ = self.encoder.apply(train_params['encoder'], split_rng, observations, cql_current_actions)
 
-                    rng, split_rng = jax.random.split(rng)
-                    cql_next_actions_rep, cql_next_log_pis = self.policy.apply(
-                        train_params['policy'], split_rng, next_observations, repeat=self.config.cql_n_actions
-                    )
-                    cql_next_actions = self.decoder.apply(train_params['decoder'], next_observations, cql_next_actions_rep)
+                rng, split_rng = jax.random.split(rng)
+                cql_next_actions, cql_next_log_pis = self.policy.apply(
+                    train_params['policy'], split_rng, next_observations, repeat=self.config.cql_n_actions
+                )
+                rng, split_rng = jax.random.split(rng)
+                cql_next_actions_rep, _ = self.encoder.apply(train_params['encoder'], split_rng, next_observations, cql_next_actions)
 
-                    cql_q1_rand = self.qf.apply(train_params['qf1'], observations, cql_random_actions)
-                    cql_q2_rand = self.qf.apply(train_params['qf2'], observations, cql_random_actions)
-                    cql_q1_current_actions = self.qf.apply(train_params['qf1'], observations, cql_current_actions)
-                    cql_q2_current_actions = self.qf.apply(train_params['qf2'], observations, cql_current_actions)
-                    cql_q1_next_actions = self.qf.apply(train_params['qf1'], observations, cql_next_actions)
-                    cql_q2_next_actions = self.qf.apply(train_params['qf2'], observations, cql_next_actions)
-                else:
-                    rng, split_rng = jax.random.split(rng)
-                    cql_random_actions = jax.random.uniform(
-                        split_rng, shape=(batch_size, self.config.cql_n_actions, self.latent_action_dim),
-                        minval=-self.latent_scale, maxval=self.latent_scale
-                    )
-
-                    rng, split_rng = jax.random.split(rng)
-                    cql_current_actions_rep, cql_current_log_pis = self.policy.apply(
-                        train_params['policy'], split_rng, observations, repeat=self.config.cql_n_actions
-                    )
-
-                    rng, split_rng = jax.random.split(rng)
-                    cql_next_actions_rep, cql_next_log_pis = self.policy.apply(
-                        train_params['policy'], split_rng, next_observations, repeat=self.config.cql_n_actions
-                    )
-                    cql_q1_rand = self.qf.apply(train_params['qf1'], observations, cql_random_actions)
-                    cql_q2_rand = self.qf.apply(train_params['qf2'], observations, cql_random_actions)
-                    cql_q1_current_actions = self.qf.apply(train_params['qf1'], observations, cql_current_actions_rep)
-                    cql_q2_current_actions = self.qf.apply(train_params['qf2'], observations, cql_current_actions_rep)
-                    cql_q1_next_actions = self.qf.apply(train_params['qf1'], observations, cql_next_actions_rep)
-                    cql_q2_next_actions = self.qf.apply(train_params['qf2'], observations, cql_next_actions_rep)
+                cql_q1_rand = self.qf.apply(train_params['qf1'], observations, cql_random_actions)[1]
+                cql_q2_rand = self.qf.apply(train_params['qf2'], observations, cql_random_actions)[1]
+                cql_q1_current_actions = self.qf.apply(train_params['qf1'], observations, cql_current_actions_rep)[1]
+                cql_q2_current_actions = self.qf.apply(train_params['qf2'], observations, cql_current_actions_rep)[1]
+                cql_q1_next_actions = self.qf.apply(train_params['qf1'], observations, cql_next_actions_rep)[1]
+                cql_q2_next_actions = self.qf.apply(train_params['qf2'], observations, cql_next_actions_rep)[1]
 
 
                 cql_cat_q1 = jnp.concatenate(
@@ -386,7 +307,7 @@ class DECQL(object):
                 cql_std_q2 = jnp.std(cql_cat_q2, axis=1)
 
                 if self.config.cql_importance_sample:
-                    random_density = np.log(0.5 ** self.latent_action_dim)
+                    random_density = np.log(0.5 ** self.action_dim)
                     cql_cat_q1 = jnp.concatenate(
                         [cql_q1_rand - random_density,
                         cql_q1_next_actions - cql_next_log_pis,
@@ -442,59 +363,39 @@ class DECQL(object):
                 qf1_loss = qf1_loss + cql_min_qf1_loss
                 qf2_loss = qf2_loss + cql_min_qf2_loss
 
-            loss_collection['qf1'] = qf1_loss
-            loss_collection['qf2'] = qf2_loss
-
-            if decorrelation:
-                rng, split_rng = jax.random.split(rng)
-                actions_rep, _ = self.encoder.apply(train_params['encoder'], split_rng, observations, actions)
-                qf1_loss = 0.0
-                qf2_loss = 0.0
-                policy_loss = 0.0
-                alpha_loss = 0.0
+            if bc:
+                loss_collection['qf1'] = 0.0
+                loss_collection['qf2'] = 0.0
+            else:
                 loss_collection['qf1'] = qf1_loss
                 loss_collection['qf2'] = qf2_loss
-                loss_collection['policy'] = policy_loss
-                loss_collection['log_alpha'] = alpha_loss
 
-
-            ### Decorrelation via GAN
-            if self.config.prior == 'uniform':
-                rng, split_rng = jax.random.split(rng)
-                marginals = jax.random.uniform(split_rng, (batch_size, self.latent_action_dim), minval=-1.0, maxval=1.0)
-            elif self.config.prior == 'gaussian':
-                rng, split_rng = jax.random.split(rng)
-                marginals = jax.random.multivariate_normal(split_rng, jnp.zeros(self.latent_action_dim), jnp.diag(jnp.ones(self.latent_action_dim)), (batch_size, ))
-            
+    
+            ### Invariance via GAN  
             valid = jnp.ones((batch_size))
             fake = jnp.zeros((batch_size))
 
 
-            g_loss = adversarial_loss(self.discriminator.apply(train_params['discriminator'], observations, actions_rep), valid)
-            reconstruct_loss = mse_loss(self.decoder.apply(train_params['decoder'], observations, actions_rep), actions)
-            rep_loss = g_loss + self.config.recon_alpha * reconstruct_loss
+            # g_loss = adversarial_loss(self.discriminator.apply(train_params['discriminator'], observations, actions_rep), valid)
 
-            if self.config.use_automatic_gloss_tuning and not decorrelation:
-                gloss_alpha_loss = -self.log_gloss_alpha.apply(train_params['log_gloss_alpha']) * (g_loss - self.config.target_gloss).mean()
-                loss_collection['log_gloss_alpha'] = gloss_alpha_loss
-                gloss_alpha = jnp.exp(self.log_gloss_alpha.apply(train_params['log_gloss_alpha'])) * self.config.gloss_alpha_multiplier
-                gloss_alpha = jnp.clip(gloss_alpha, 0.0, 1000.0)
-            else:
-                gloss_alpha_loss = 0.0
-                loss_collection['log_gloss_alpha'] = gloss_alpha_loss
-                gloss_alpha = self.config.gloss_alpha
+            # if self.config.use_automatic_gloss_tuning:
+            #     gloss_alpha_loss = -self.log_gloss_alpha.apply(train_params['log_gloss_alpha']) * (g_loss - self.config.target_gloss).mean()
+            #     loss_collection['log_gloss_alpha'] = gloss_alpha_loss
+            #     gloss_alpha = jnp.exp(self.log_gloss_alpha.apply(train_params['log_gloss_alpha'])) * self.config.gloss_alpha_multiplier
+            #     gloss_alpha = jnp.clip(gloss_alpha, 0.0, 10000.0)
+            # else:
+            #     gloss_alpha_loss = 0.0
+            #     loss_collection['log_gloss_alpha'] = gloss_alpha_loss
+            #     gloss_alpha = self.config.gloss_alpha
 
-            if original_q:
-                encoder_loss = rep_loss 
-            else:
-                encoder_loss = (qf1_loss + qf2_loss) / 2.0 + gloss_alpha * rep_loss 
-            loss_collection['encoder'] = encoder_loss
 
-            if original_q:
-                decoder_loss = policy_loss + self.config.gloss_alpha * reconstruct_loss
-            else:
-                decoder_loss = reconstruct_loss           
-            loss_collection['decoder'] = decoder_loss
+            # encoder_loss = (qf1_loss + qf2_loss) / 2.0 + gloss_alpha * g_loss
+            # encoder_loss = (qf1_loss + qf2_loss) / 2.0 - gloss_alpha * d_loss
+            # # encoder_loss = g_loss
+            # if bc:
+            #     loss_collection['encoder'] = 0.0
+            # else:
+            #     loss_collection['encoder'] = encoder_loss
 
 
             if self.config.smooth_dis:
@@ -504,19 +405,33 @@ class DECQL(object):
 
             if self.dropout:
                 rng, split_rng, split_rng2 = jax.random.split(rng, 3) 
-                real_loss = adversarial_loss(self.discriminator.apply(train_params['discriminator'], observations, marginals, train=True,
+                real_loss = adversarial_loss(self.discriminator.apply(train_params['discriminator'], observations, new_actions_rep, train=True,
                             rngs={'dropout': split_rng}), valid)
                 fake_loss = adversarial_loss(self.discriminator.apply(train_params['discriminator'], observations, actions_rep, train=True,
                             rngs={'dropout': split_rng2}), fake)
             else:
-                real_loss = adversarial_loss(self.discriminator.apply(train_params['discriminator'], observations, marginals), valid)
+                real_loss = adversarial_loss(self.discriminator.apply(train_params['discriminator'], observations, new_actions_rep), valid)
                 fake_loss = adversarial_loss(self.discriminator.apply(train_params['discriminator'], observations, actions_rep), fake)
 
             d_loss = (real_loss + fake_loss) / 2
-            loss_collection['discriminator'] = d_loss
+
+            if bc:
+                loss_collection['discriminator'] = 0.0
+            else:
+                loss_collection['discriminator'] = d_loss
+
+            
+
+            # encoder_loss = (qf1_loss + qf2_loss) / 2.0 + gloss_alpha * g_loss
+            encoder_loss = (qf1_loss + qf2_loss) / 2.0 - self.config.gloss_alpha * d_loss
+            # encoder_loss = g_loss
+            if bc:
+                loss_collection['encoder'] = 0.0
+            else:
+                loss_collection['encoder'] = encoder_loss
 
              ### Accuracy ###
-            real_result = jax.lax.stop_gradient(self.discriminator.apply(train_params['discriminator'], observations, marginals))
+            real_result = jax.lax.stop_gradient(self.discriminator.apply(train_params['discriminator'], observations, new_actions_rep))
             real_pred1 = real_result >= 0.5
             real_accuracy = jnp.mean(real_pred1 * 1.0)
             real_pred_mean = jnp.mean(real_result)
@@ -549,6 +464,7 @@ class DECQL(object):
                 latent_ac_std_min = jnp.min(ac_std)
                 latent_ac_std_mean = jnp.mean(ac_std)
                 latent_ac_std_std = jnp.std(ac_std) 
+            
 
             return tuple(loss_collection[key] for key in self.model_keys), locals()
 
@@ -576,17 +492,15 @@ class DECQL(object):
             qf2_loss=aux_values['qf2_loss'],
             alpha_loss=aux_values['alpha_loss'],
             alpha=aux_values['alpha'],
-            gloss_alpha=aux_values['gloss_alpha'],
+            # gloss_alpha=aux_values['gloss_alpha'],
             average_qf1=aux_values['q1_pred'].mean(),
             average_qf2=aux_values['q2_pred'].mean(),
             average_target_q=aux_values['target_q_values'].mean(),
         )
 
         metrics.update(prefix_metrics(dict(
-                g_loss=aux_values['g_loss'],
-                rep_loss=aux_values['rep_loss'],
+                # g_loss=aux_values['g_loss'],
                 encoder_loss=aux_values['encoder_loss'],
-                decoder_loss=aux_values['reconstruct_loss'],
                 discriminator_loss=aux_values['d_loss'],
                 real_accuracy=aux_values['real_accuracy'],
                 fake_accuracy=aux_values['fake_accuracy'],
@@ -636,9 +550,7 @@ class DECQL(object):
         
         if self.config.distance_logging:
             metrics.update(prefix_metrics(dict(
-                latent_dis_accuracy=aux_values['latent_dis_accuracy'],
                 bc_log_prob=aux_values['bc_log_prob'],
-                dataset_log_prob=aux_values['dataset_log_prob'],
             ), 'cql'))
 
         return new_train_states, new_target_qf_params, metrics

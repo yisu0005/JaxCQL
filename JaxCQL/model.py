@@ -329,7 +329,6 @@ class ActionRepresentationPolicy(nn.Module):
                 distrax.MultivariateNormalDiag(mean, jnp.exp(log_std)),
                 distrax.Block(distrax.Tanh(), ndims=1)
             )
-        # return action_distribution.log_prob(latent_actions / self.action_scale)
         return action_distribution.log_prob(latent_actions)
 
     @nn.compact
@@ -355,7 +354,6 @@ class ActionRepresentationPolicy(nn.Module):
         else:
             samples, log_prob = action_distribution.sample_and_log_prob(seed=rng)
 
-        # samples = samples * self.action_scale
         return samples, log_prob
 
     def get_statistics(self, rng, observations, actions, deterministic=False, repeat=None):
@@ -379,7 +377,85 @@ class ActionRepresentationPolicy(nn.Module):
         else:
             samples, log_prob = action_distribution.sample_and_log_prob(seed=rng)
 
-        # samples = samples * self.action_scale
+        return samples, mean, log_std
+
+
+class ActionOnlyRepresentationPolicy(nn.Module):
+    action_dim: int
+    latent_action_dim: int
+    arch: str = '256-256'
+    orthogonal_init: bool = False
+    no_tanh: bool = False
+    log_std_multiplier: float = 1.0
+    log_std_offset: float = -1.0
+
+
+    def setup(self):
+        self.base_network = FullyConnectedNetwork(
+            output_dim=2 * self.latent_action_dim, arch=self.arch, orthogonal_init=self.orthogonal_init
+        )
+        self.log_std_multiplier_module = Scalar(self.log_std_multiplier)
+        self.log_std_offset_module = Scalar(self.log_std_offset)
+
+    def log_prob(self, actions, latent_actions):
+        if actions.ndim == 3:
+            observations = extend_and_repeat(observations, 1, actions.shape[1])
+        base_network_output = self.base_network(actions)
+        mean, log_std = jnp.split(base_network_output, 2, axis=-1)
+        log_std = self.log_std_multiplier_module() * log_std + self.log_std_offset_module()
+        log_std = jnp.clip(log_std, -20.0, 2.0)
+        if self.no_tanh:
+            action_distribution = distrax.MultivariateNormalDiag(mean, jnp.exp(log_std))
+        else:
+            action_distribution = distrax.Transformed(
+                distrax.MultivariateNormalDiag(mean, jnp.exp(log_std)),
+                distrax.Block(distrax.Tanh(), ndims=1)
+            )
+        return action_distribution.log_prob(latent_actions)
+
+    @nn.compact
+    def __call__(self, rng, actions, deterministic=False, repeat=None):
+        if repeat is not None:
+            observations = extend_and_repeat(observations, 1, repeat)
+        base_network_output = self.base_network(actions)
+        mean, log_std = jnp.split(base_network_output, 2, axis=-1)
+        log_std = self.log_std_multiplier_module() * log_std + self.log_std_offset_module()
+        log_std = jnp.clip(log_std, -20.0, 2.0)
+        if self.no_tanh:
+            action_distribution = distrax.MultivariateNormalDiag(mean, jnp.exp(log_std))
+        else:
+            action_distribution = distrax.Transformed(
+                distrax.MultivariateNormalDiag(mean, jnp.exp(log_std)),
+                distrax.Block(distrax.Tanh(), ndims=1)
+            )
+        if deterministic:
+            samples = jnp.tanh(mean)
+            log_prob = action_distribution.log_prob(samples)
+        else:
+            samples, log_prob = action_distribution.sample_and_log_prob(seed=rng)
+
+        return samples, log_prob
+
+    def get_statistics(self, rng, actions, deterministic=False, repeat=None):
+        if repeat is not None:
+            observations = extend_and_repeat(observations, 1, repeat)
+        base_network_output = self.base_network(actions)
+        mean, log_std = jnp.split(base_network_output, 2, axis=-1)
+        log_std = self.log_std_multiplier_module() * log_std + self.log_std_offset_module()
+        log_std = jnp.clip(log_std, -20.0, 2.0)
+        if self.no_tanh:
+            action_distribution = distrax.MultivariateNormalDiag(mean, jnp.exp(log_std))
+        else:
+            action_distribution = distrax.Transformed(
+                distrax.MultivariateNormalDiag(mean, jnp.exp(log_std)),
+                distrax.Block(distrax.Tanh(), ndims=1)
+            )
+        if deterministic:
+            samples = jnp.tanh(mean)
+            log_prob = action_distribution.log_prob(samples)
+        else:
+            samples, log_prob = action_distribution.sample_and_log_prob(seed=rng)
+
         return samples, mean, log_std
 
 
@@ -485,9 +561,11 @@ class Discriminator(nn.Module):
         hidden_sizes = [int(h) for h in self.arch.split('-')]
         for h in hidden_sizes:
             x = nn.Dense(h)(x)
+            # dropout
+            # layer norm
             x = nn.leaky_relu(x, 0.2)
             if self.dropout:
-                x = nn.Dropout(0.5)(x, deterministic=not train)
+                x = nn.Dropout(0.1)(x, deterministic=not train)
         output = nn.Dense(1)(x)
         return output
 
