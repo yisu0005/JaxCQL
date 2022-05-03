@@ -287,7 +287,6 @@ def main(argv):
             FLAGS.policy_log_std_multiplier, FLAGS.policy_log_std_offset, FLAGS.action_scale
         )
 
-        # qf = FullyConnectedQFunction(observation_dim, action_dim, FLAGS.qf_arch, FLAGS.orthogonal_init)
         if FLAGS.qf_seperate_action:
             qf = FullyConnectedActionQFunction(observation_dim, action_dim, 1, FLAGS.qf_arch, FLAGS.orthogonal_init, FLAGS.qf_normalize)
         else:

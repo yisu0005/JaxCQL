@@ -30,7 +30,6 @@ class DECQL(object):
         config.use_automatic_gloss_tuning = False
         config.backup_entropy = False
         config.target_entropy = 0.0
-        config.target_gloss = 0.6
         config.policy_lr = 3e-4
         config.qf_lr = 3e-4
         config.encoder_lr = 3e-4
@@ -375,29 +374,6 @@ class DECQL(object):
             valid = jnp.ones((batch_size))
             fake = jnp.zeros((batch_size))
 
-
-            # g_loss = adversarial_loss(self.discriminator.apply(train_params['discriminator'], observations, actions_rep), valid)
-
-            # if self.config.use_automatic_gloss_tuning:
-            #     gloss_alpha_loss = -self.log_gloss_alpha.apply(train_params['log_gloss_alpha']) * (g_loss - self.config.target_gloss).mean()
-            #     loss_collection['log_gloss_alpha'] = gloss_alpha_loss
-            #     gloss_alpha = jnp.exp(self.log_gloss_alpha.apply(train_params['log_gloss_alpha'])) * self.config.gloss_alpha_multiplier
-            #     gloss_alpha = jnp.clip(gloss_alpha, 0.0, 10000.0)
-            # else:
-            #     gloss_alpha_loss = 0.0
-            #     loss_collection['log_gloss_alpha'] = gloss_alpha_loss
-            #     gloss_alpha = self.config.gloss_alpha
-
-
-            # encoder_loss = (qf1_loss + qf2_loss) / 2.0 + gloss_alpha * g_loss
-            # encoder_loss = (qf1_loss + qf2_loss) / 2.0 - gloss_alpha * d_loss
-            # # encoder_loss = g_loss
-            # if bc:
-            #     loss_collection['encoder'] = 0.0
-            # else:
-            #     loss_collection['encoder'] = encoder_loss
-
-
             if self.config.smooth_dis:
                 rng, split_rng = jax.random.split(rng)
                 bernoulli = jax.random.bernoulli(split_rng, 0.5, jnp.shape(valid)) * 0.2
@@ -422,9 +398,7 @@ class DECQL(object):
 
             
 
-            # encoder_loss = (qf1_loss + qf2_loss) / 2.0 + gloss_alpha * g_loss
             encoder_loss = (qf1_loss + qf2_loss) / 2.0 - self.config.gloss_alpha * d_loss
-            # encoder_loss = g_loss
             if bc:
                 loss_collection['encoder'] = 0.0
             else:
@@ -492,14 +466,12 @@ class DECQL(object):
             qf2_loss=aux_values['qf2_loss'],
             alpha_loss=aux_values['alpha_loss'],
             alpha=aux_values['alpha'],
-            # gloss_alpha=aux_values['gloss_alpha'],
             average_qf1=aux_values['q1_pred'].mean(),
             average_qf2=aux_values['q2_pred'].mean(),
             average_target_q=aux_values['target_q_values'].mean(),
         )
 
         metrics.update(prefix_metrics(dict(
-                # g_loss=aux_values['g_loss'],
                 encoder_loss=aux_values['encoder_loss'],
                 discriminator_loss=aux_values['d_loss'],
                 real_accuracy=aux_values['real_accuracy'],
