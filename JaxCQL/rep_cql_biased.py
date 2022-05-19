@@ -1,0 +1,416 @@
+import os
+import time
+from copy import deepcopy
+import uuid
+import numpy as np
+import pprint
+import cloudpickle as pickle
+
+import jax
+import jax.numpy as jnp
+import flax
+
+import gym
+import d4rl
+
+import absl.app
+import absl.flags
+
+from .rep_cql import REPCQL
+from .rep import REP
+from .bc_policy import BC
+from .replay_buffer import get_d4rl_dataset, get_preprocessed_dataset, subsample_batch, get_top_dataset, get_sarsa_dataset, get_preprocessed_dataset
+from .jax_utils import batch_to_jax, next_rng
+from .model import TanhGaussianPolicy, FullyConnectedQFunction, FullyConnectedQFunction, SamplerPolicy, SamplerDecoder, SamplerEncoder, Discriminator, ActionDecoder, ActionSeperatedDecoder, ActionRepresentationPolicy
+from .sampler import StepSampler, TrajSampler
+from .utils import Timer, define_flags_with_default, set_random_seed, print_flags, get_user_flags, prefix_metrics
+from .utils import WandBLogger, random_split
+from viskit.logging import logger, setup_logger
+
+
+FLAGS_DEF = define_flags_with_default(
+    env='halfcheetah-medium-v2',
+    max_traj_length=1000,
+    seed=42,
+    rep_seed=42,
+    save_model=False,
+    batch_size=256,
+    rep_batch_size=512,
+
+    reward_scale=5.0,
+    reward_bias=-10.0,
+    clip_action=0.999,
+
+    policy_arch='256-256',
+    qf_arch='256-256-256',
+    orthogonal_init=False,
+    policy_log_std_multiplier=1.0,
+    policy_log_std_offset=-1.0,
+    policy_entropy_scale=2.0, 
+
+    n_epochs=2000,
+    bc_epochs=0,
+    n_train_step_per_epoch=1000,
+    eval_period=50,
+    eval_n_trajs=100,
+    
+    train_decorrelation=True,
+    train_bc=True,
+    train_cql=True,
+    encoder_no_tanh=True,
+    action_seperate_decoder=True,
+    action_scale=1.3,
+    discriminator_arch='512-256',
+    encoder_arch='256-256',
+    decoder_arch='256-256',
+    decorrelation_method='GAN',
+    decorrelation_epochs=500, 
+    decor_n_train_step_per_epoch=1000,
+    policy_n_epochs=100,
+    policy_n_train_step_per_epoch=500,
+    latent_dim=2.0,
+    dis_dropout=False,
+    bc_filter_success=True,
+    bc_filter_percentile=100.0,
+
+    rep=REP.get_default_config(),
+    bc=BC.get_default_config(),
+    cql=REPCQL.get_default_config(),
+    logging=WandBLogger.get_default_config(),
+)
+
+import os
+try:
+	os.chdir(os.path.join(os.getcwd(), 'RobomimicCQL/SimpleSAC'))
+	print(os.getcwd())
+except:
+	pass
+
+from tqdm import tqdm
+import os
+import h5py
+
+import d4rl, gym
+
+
+urls = {
+    'antmaze-umaze-v0' : 'http://rail.eecs.berkeley.edu/datasets/offline_rl/ant_maze_new/Ant_maze_u-maze_noisy_multistart_False_multigoal_False_sparse.hdf5',
+    'antmaze-umaze-diverse-v0' : 'http://rail.eecs.berkeley.edu/datasets/offline_rl/ant_maze_new/Ant_maze_u-maze_noisy_multistart_True_multigoal_True_sparse.hdf5',
+    'antmaze-medium-play-v0' : 'http://rail.eecs.berkeley.edu/datasets/offline_rl/ant_maze_new/Ant_maze_big-maze_noisy_multistart_True_multigoal_False_sparse.hdf5',
+    'antmaze-medium-diverse-v0' : 'http://rail.eecs.berkeley.edu/datasets/offline_rl/ant_maze_new/Ant_maze_big-maze_noisy_multistart_True_multigoal_True_sparse.hdf5',
+    'antmaze-large-play-v0' : 'http://rail.eecs.berkeley.edu/datasets/offline_rl/ant_maze_new/Ant_maze_hardest-maze_noisy_multistart_True_multigoal_False_sparse.hdf5',
+    'antmaze-large-diverse-v0' : 'http://rail.eecs.berkeley.edu/datasets/offline_rl/ant_maze_new/Ant_maze_hardest-maze_noisy_multistart_True_multigoal_True_sparse.hdf5',
+    'antmaze-medium-actually-biased-v2': 'https://storage.googleapis.com/heterogeneous_data/recollect_antmaze/Antmaze_big-maze_biased_True_multigoal_False_new_actually_larger_bias_relabel_final_large_biassparse.hdf5',
+    'antmaze-medium-new-biased-v2': 'https://storage.googleapis.com/heterogeneous_data/recollect_antmaze/Antmaze_big-maze_biased_True_multigoal_False_new_larger_bias_relabelsparse.hdf5',
+    'antmaze-large-actually-biased-v2': 'https://storage.googleapis.com/heterogeneous_data/recollect_antmaze/Antmaze_hardest-maze_biased_True_multigoal_False_new_actually_larger_bias_relabel_final_large_biassparse.hdf5',
+    'antmaze-large-new-biased-v2': 'https://storage.googleapis.com/heterogeneous_data/recollect_antmaze/Antmaze_hardest-maze_biased_True_multigoal_False_new_larger_bias_relabelsparse.hdf5',
+}
+
+
+def get_keys(h5file):
+    keys = []
+
+    def visitor(name, item):
+        if isinstance(item, h5py.Dataset):
+            keys.append(name)
+
+    h5file.visititems(visitor)
+    return keys
+
+def get_dict(filename):
+    data_dict = {}
+    with h5py.File(filename, 'r') as dataset_file:
+        print(dataset_file)
+        for k in tqdm(get_keys(dataset_file), desc="load datafile"):
+            try:  # first try loading as an array
+                data_dict[k] = dataset_file[k][:]
+            except ValueError as e:  # try loading as a scalar
+                data_dict[k] = dataset_file[k][()]
+    return data_dict
+
+# for env_name, url in urls.items():
+#     env = gym.make(env_name)
+#     _ = d4rl.qlearning_dataset(env)
+#     filename = os.path.join('/home/yisu/.d4rl/datasets/', url.split('/')[-1])
+#     time_limit = 701 if env_name == 'antmaze-umaze-v0' else 1001
+#     data_dict = get_dict(filename)
+#     data_dict['timeouts'].fill(False)
+#     data_dict['timeouts'][time_limit-1::time_limit] = True
+#     dataset = h5py.File(filename.replace('sparse', 'sparse_fixed'), 'w')
+#     for k, v in data_dict.items():
+#         dataset.create_dataset(k, data=v, compression='gzip')
+#     dataset.close()
+
+
+def main(argv):
+    FLAGS = absl.flags.FLAGS
+
+    # for env_name, url in urls.items():
+    #     env = gym.make(env_name)
+    #     _ = d4rl.qlearning_dataset(env)
+    #     filename = os.path.join('/home/yisu/.d4rl/datasets/', url.split('/')[-1])
+    #     time_limit = 701 if env_name == 'antmaze-umaze-v0' else 1001
+    #     data_dict = get_dict(filename)
+    #     data_dict['timeouts'] = deepcopy(data_dict['terminals'])
+    #     data_dict['timeouts'].fill(False)
+    #     data_dict['timeouts'][time_limit-1::time_limit] = True
+    #     dataset = h5py.File(filename.replace('sparse', 'sparse_fixed'), 'w')
+    #     for k, v in data_dict.items():
+    #         dataset.create_dataset(k, data=v, compression='gzip')
+    #     dataset.close()
+
+    variant = get_user_flags(FLAGS, FLAGS_DEF)
+    wandb_logger = WandBLogger(config=FLAGS.logging, variant=variant)
+    setup_logger(
+        variant=variant,
+        exp_id=wandb_logger.experiment_id,
+        seed=FLAGS.seed,
+        base_log_dir=FLAGS.logging.output_dir,
+        include_exp_prefix_sub_dir=False
+    )
+
+    model_dir = 'models'
+    os.makedirs(model_dir, exist_ok=True)
+
+    set_random_seed(FLAGS.seed)
+
+    eval_sampler = TrajSampler(gym.make(FLAGS.env).unwrapped, FLAGS.max_traj_length)
+    observation_dim = eval_sampler.env.observation_space.shape[0]
+    action_dim = eval_sampler.env.action_space.shape[0]
+    latent_action_dim = int(FLAGS.latent_dim * action_dim)
+    
+
+    dataset = get_d4rl_dataset(eval_sampler.env)
+    # dataset = get_preprocessed_dataset(eval_sampler.env, latent_action_dim)
+    dataset['rewards'] = dataset['rewards'] * FLAGS.reward_scale + FLAGS.reward_bias
+    dataset['actions'] = np.clip(dataset['actions'], -FLAGS.clip_action, FLAGS.clip_action)
+
+    # if FLAGS.bc_filter_success:
+    #     top_dataset = get_top_dataset(dataset)
+    # else:
+    #     top_dataset = get_top_dataset(dataset, filter_success=False, percentile=FLAGS.bc_filter_percentile)
+
+    # sarsa_dataset = get_sarsa_dataset(eval_sampler.env)
+    # train_dataset, val_dataset = random_split(sarsa_dataset, 0.9, seed=FLAGS.seed)
+
+    """
+    Decorrelation Training
+    """
+
+    encoder = ActionRepresentationPolicy(
+        observation_dim,
+        action_dim, 
+        latent_action_dim, 
+        FLAGS.encoder_arch,
+        FLAGS.orthogonal_init,
+        FLAGS.encoder_no_tanh,
+        FLAGS.policy_log_std_multiplier,
+        FLAGS.policy_log_std_offset,
+        # FLAGS.action_scale,
+        )
+
+    discriminator = Discriminator(
+        observation_dim, 
+        latent_action_dim,
+        # action_dim,
+        FLAGS.discriminator_arch,
+        FLAGS.dis_dropout,
+    )
+
+    if FLAGS.action_seperate_decoder:
+        decoder = ActionSeperatedDecoder(
+        observation_dim,
+        latent_action_dim,
+        action_dim,
+        FLAGS.decoder_arch, 
+        FLAGS.orthogonal_init, 
+        )
+    else:
+        decoder = ActionDecoder(
+        observation_dim,
+        latent_action_dim,
+        action_dim,
+        FLAGS.decoder_arch, 
+        FLAGS.orthogonal_init, 
+        )
+
+
+    rep_qf = FullyConnectedQFunction(observation_dim, action_dim, FLAGS.qf_arch, FLAGS.orthogonal_init)
+
+    rep = REP(FLAGS.rep, encoder, discriminator, decoder, rep_qf, method=FLAGS.decorrelation_method)
+
+    if FLAGS.train_decorrelation:
+        viskit_metrics = {}
+        for epoch in range(FLAGS.decorrelation_epochs):
+            metrics = {'epoch': epoch}
+
+            with Timer() as train_timer:
+                for batch_idx in range(FLAGS.decor_n_train_step_per_epoch):
+                    batch = batch_to_jax(subsample_batch(dataset, FLAGS.rep_batch_size))
+                    metrics.update(prefix_metrics(rep.train(batch), 'decorrelation'))
+            
+            # with Timer() as eval_timer:
+            #     if epoch == 0 or (epoch + 1) % 10 == 0:
+            #         for batch_idx in range(FLAGS.decor_n_train_step_per_epoch):
+            #             batch = batch_to_jax(subsample_batch(val_dataset, FLAGS.rep_batch_size))
+            #             metrics.update(prefix_metrics(rep.val(batch), 'decorrelation_validation'))
+            
+            wandb_logger.log(metrics)
+            viskit_metrics.update(metrics)
+            logger.record_dict(metrics)
+            logger.dump_tabular(with_prefix=False, with_timestamp=False)
+
+        filename = '-'.join([FLAGS.env, str(FLAGS.seed), str(rep.config.recon_alpha), str(rep.config.z_alpha)]) + '.pkl' 
+
+        with open(os.path.join(model_dir, filename), 'wb') as fout:
+            rep_data = {'rep': rep, 'variant': variant, 'epoch': epoch}
+            pickle.dump(rep_data, fout)
+    else:
+        filename = '-'.join([FLAGS.env, str(FLAGS.rep_seed), str(rep.config.recon_alpha), str(rep.config.z_alpha)]) + '.pkl' 
+
+        with open(os.path.join(model_dir, filename), 'rb') as fin:
+            rep_data = pickle.load(fin)
+            rep = rep_data['rep']
+
+    if FLAGS.train_bc:
+        """
+        BC Training
+        """
+        logger_policy = TanhGaussianPolicy(
+            observation_dim, 
+            action_dim, 
+            FLAGS.policy_arch,
+            FLAGS.orthogonal_init,
+            FLAGS.policy_log_std_multiplier,
+            FLAGS.policy_log_std_offset,
+        )
+
+        bc_agent = BC(FLAGS.bc, logger_policy)
+
+        viskit_metrics = {}
+        for epoch in range(FLAGS.policy_n_epochs):
+            metrics = {'epoch': epoch}
+
+            with Timer() as train_timer:
+                for batch_idx in range(FLAGS.policy_n_train_step_per_epoch):
+                    batch = batch_to_jax(subsample_batch(dataset, FLAGS.batch_size))
+                    metrics.update(prefix_metrics(bc_agent.train(batch), 'bc'))
+
+            wandb_logger.log(metrics)
+            viskit_metrics.update(metrics)
+            logger.record_dict(metrics)
+            logger.dump_tabular(with_prefix=False, with_timestamp=False)
+
+    # """
+    # Disganosis for U(-1,1)
+    # """
+    # sampler_encoder = SamplerEncoder(rep.encoder, rep.train_params['encoder']) 
+    # sampler_decoder = SamplerDecoder(rep.decoder, rep.train_params['decoder'])
+    # trajs = eval_sampler.repa_sample(
+    #                     None,
+    #                     sampler_decoder, 
+    #                     FLAGS.eval_n_trajs, deterministic=True,
+    #                     latent_ac_dim=latent_action_dim,
+    #                 )
+
+    # decoder_metrics = {}
+    # decoder_metrics['average_return'] = np.mean([np.sum(t['rewards']) for t in trajs])
+    # decoder_metrics['average_traj_length'] = np.mean([len(t['rewards']) for t in trajs])
+    # decoder_metrics['average_normalizd_return'] = np.mean(
+    #     [eval_sampler.env.get_normalized_score(np.sum(t['rewards'])) for t in trajs]
+    # )
+    # print(decoder_metrics)
+
+    # """
+    # BC
+    # """
+    # bc_sampler_policy = SamplerPolicy(bc_agent.policy, bc_agent.train_params['policy'])
+    # trajs = eval_sampler.sample(
+    #                     bc_sampler_policy,
+    #                     FLAGS.eval_n_trajs, deterministic=True,
+    #                 )
+
+    # decoder_metrics = {}
+    # decoder_metrics['average_return'] = np.mean([np.sum(t['rewards']) for t in trajs])
+    # decoder_metrics['average_traj_length'] = np.mean([len(t['rewards']) for t in trajs])
+    # decoder_metrics['average_normalizd_return'] = np.mean(
+    #     [eval_sampler.env.get_normalized_score(np.sum(t['rewards'])) for t in trajs]
+    # )
+    # print(decoder_metrics)
+
+    # """
+    # Encoded/Decoded BC
+    # """
+    # trajs = eval_sampler.sample_decoded(
+    #     next_rng(), bc_sampler_policy, sampler_encoder, sampler_decoder, FLAGS.eval_n_trajs, deterministic=True,
+    # )
+    # decoder_metrics = {}
+    # decoder_metrics['average_return'] = np.mean([np.sum(t['rewards']) for t in trajs])
+    # decoder_metrics['average_traj_length'] = np.mean([len(t['rewards']) for t in trajs])
+    # decoder_metrics['average_normalizd_return'] = np.mean(
+    #     [eval_sampler.env.get_normalized_score(np.sum(t['rewards'])) for t in trajs]
+    # )
+    # print(decoder_metrics)
+
+
+
+    if FLAGS.train_cql:
+        
+        """
+        RL Training (SAC)
+        """
+        policy = TanhGaussianPolicy(
+            observation_dim, latent_action_dim, FLAGS.policy_arch, FLAGS.orthogonal_init,
+            FLAGS.policy_log_std_multiplier, FLAGS.policy_log_std_offset, FLAGS.action_scale
+        )
+
+        qf = FullyConnectedQFunction(observation_dim, action_dim, FLAGS.qf_arch, FLAGS.orthogonal_init)
+
+        if FLAGS.cql.target_entropy >= 0.0:
+            FLAGS.cql.target_entropy = -(np.prod(eval_sampler.env.action_space.shape) * FLAGS.policy_entropy_scale).item()
+        
+
+        repcql = REPCQL(FLAGS.cql, policy, qf, rep, bc_agent)
+        sampler_policy = SamplerPolicy(repcql.policy, repcql.train_params['policy'])
+        sampler_decoder = SamplerDecoder(rep.decoder, rep.train_params['decoder'])
+
+        viskit_metrics = {}
+        for epoch in range(FLAGS.n_epochs):
+            metrics = {'epoch': epoch}
+
+            with Timer() as train_timer:
+                for batch_idx in range(FLAGS.n_train_step_per_epoch):
+                    batch = batch_to_jax(subsample_batch(dataset, FLAGS.batch_size))
+                    metrics.update(prefix_metrics(repcql.train(batch, bc=epoch < FLAGS.bc_epochs), 'repcql'))
+
+            with Timer() as eval_timer:
+                if epoch == 0 or (epoch + 1) % FLAGS.eval_period == 0:
+                    trajs = eval_sampler.repa_sample(
+                        sampler_policy.update_params(repcql.train_params['policy']),
+                        sampler_decoder, 
+                        FLAGS.eval_n_trajs, deterministic=True
+                    )
+
+                    metrics['average_return'] = np.mean([np.sum(t['rewards']) for t in trajs])
+                    metrics['average_traj_length'] = np.mean([len(t['rewards']) for t in trajs])
+                    metrics['average_normalizd_return'] = np.mean(
+                        [eval_sampler.env.get_normalized_score(np.sum(t['rewards'])) for t in trajs]
+                    )
+                    if FLAGS.save_model:
+                        save_data = {'repcql': repcql, 'variant': variant, 'epoch': epoch}
+                        wandb_logger.save_pickle(save_data, 'model.pkl')
+
+            metrics['train_time'] = train_timer()
+            metrics['eval_time'] = eval_timer()
+            metrics['epoch_time'] = train_timer() + eval_timer()
+            wandb_logger.log(metrics)
+            viskit_metrics.update(metrics)
+            logger.record_dict(viskit_metrics)
+            logger.dump_tabular(with_prefix=False, with_timestamp=False)
+
+        if FLAGS.save_model:
+            save_data = {'repcql': repcql, 'variant': variant, 'epoch': epoch}
+            wandb_logger.save_pickle(save_data, 'model.pkl')
+
+if __name__ == '__main__':
+    absl.app.run(main)

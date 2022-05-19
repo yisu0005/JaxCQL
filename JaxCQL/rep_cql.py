@@ -28,7 +28,7 @@ class REPCQL(object):
         config.use_automatic_entropy_tuning = True
         config.backup_entropy = False
         config.target_entropy = 0.0
-        config.policy_lr = 2e-4
+        config.policy_lr = 3e-4
         config.qf_lr = 3e-4
         config.optimizer_type = 'adam'
         config.reg_type = 'dr3'
@@ -40,7 +40,7 @@ class REPCQL(object):
         config.cql_target_action_gap = 1.0
         config.cql_temp = 1.0
         config.cql_min_q_weight = 0.0
-        config.cql_max_target_backup = False 
+        config.cql_max_target_backup = True 
         config.cql_clip_diff_min = -np.inf
         config.cql_clip_diff_max = np.inf
         config.epsilon = 1e-4
@@ -160,12 +160,6 @@ class REPCQL(object):
             new_actions_rep, log_pi = self.policy.apply(train_params['policy'], split_rng, observations, deterministic=self.config.deterministic_action)
             new_actions = self.decoder.apply(self.rep.train_params['decoder'], observations, new_actions_rep)
 
-            # train_action_l2 = jnp.mean(jnp.linalg.norm(new_actions - actions, axis=-1))
-            # rng, split_rng = jax.random.split(rng)
-            # new_actions_decoded, _ = self.encoder.apply(self.rep.train_params['encoder'], split_rng, observations, new_actions)
-            # decoded_action_l2 = jnp.mean(jnp.linalg.norm(new_actions_rep - new_actions_decoded, axis=-1)) 
-
-
             if self.config.distance_logging:
                 latent_dis_accuracy = self.discriminator.apply(self.rep.train_params['discriminator'], observations, new_actions_rep).mean()
                 bc_log_prob = self.bc_agent.log_likelihood(observations, actions)
@@ -193,15 +187,10 @@ class REPCQL(object):
                 policy_loss = (alpha*log_pi - log_probs).mean()
             else:
                 if original_q:
-                    _, q1_new_actions = self.qf.apply(train_params['qf1'], observations, new_actions)
-                    _, q2_new_actions = self.qf.apply(train_params['qf2'], observations, new_actions)
                     q_new_actions = jnp.minimum(
-                        q1_new_actions, q2_new_actions
+                        self.qf.apply(train_params['qf1'], observations, new_actions),
+                        self.qf.apply(train_params['qf2'], observations, new_actions),
                     )
-                    # q_new_actions = jnp.minimum(
-                    #     self.qf.apply(train_params['qf1'], observations, new_actions),
-                    #     self.qf.apply(train_params['qf2'], observations, new_actions),
-                    # )
                 else:
                     q_new_actions = jnp.minimum(
                         self.qf.apply(train_params['qf1'], observations, new_actions_rep),
@@ -213,10 +202,8 @@ class REPCQL(object):
 
             """ Q function loss """
             if original_q:
-                q1_pred_lastlayer, q1_pred = self.qf.apply(train_params['qf1'], observations, actions)
-                q2_pred_lastlayer, q2_pred = self.qf.apply(train_params['qf2'], observations, actions)
-                # q1_pred = self.qf.apply(train_params['qf1'], observations, actions)
-                # q2_pred = self.qf.apply(train_params['qf2'], observations, actions)
+                q1_pred = self.qf.apply(train_params['qf1'], observations, actions)
+                q2_pred = self.qf.apply(train_params['qf2'], observations, actions)
             else:
                 actions_rep, _ = self.encoder.apply(self.rep.train_params['encoder'], split_rng, observations, actions) 
                 actions_rep = jnp.clip(actions_rep, -1 * self.latent_scale + self.config.epsilon, 1 * self.latent_scale - self.config.epsilon)
@@ -241,6 +228,7 @@ class REPCQL(object):
                         train_params['policy'], split_rng, next_observations, repeat=self.config.cql_n_actions
                     )
                     new_next_actions = self.decoder.apply(self.rep.train_params['decoder'], next_observations, new_next_actions_rep)
+
                     target_q_values = jnp.minimum(
                         self.qf.apply(target_qf_params['qf1'], next_observations, new_next_actions),
                         self.qf.apply(target_qf_params['qf2'], next_observations, new_next_actions),
@@ -265,15 +253,10 @@ class REPCQL(object):
                     )
                     new_next_actions = self.decoder.apply(self.rep.train_params['decoder'], next_observations, new_next_actions_rep)
 
-                    q1_next_pred_lastlayer, q1_next_actions = self.qf.apply(train_params['qf1'], next_observations, new_next_actions)
-                    q2_next_pred_lastlayer, q2_next_actions = self.qf.apply(train_params['qf2'], next_observations, new_next_actions)
                     target_q_values = jnp.minimum(
-                        q1_next_actions, q2_next_actions,
+                        self.qf.apply(target_qf_params['qf1'], next_observations, new_next_actions),
+                        self.qf.apply(target_qf_params['qf2'], next_observations, new_next_actions),
                     )
-                    # target_q_values = jnp.minimum(
-                    #     self.qf.apply(target_qf_params['qf1'], next_observations, new_next_actions),
-                    #     self.qf.apply(target_qf_params['qf2'], next_observations, new_next_actions),
-                    # )
                 else:
                     new_next_actions_rep, next_log_pi = self.policy.apply(
                         train_params['policy'], split_rng, next_observations, deterministic=self.config.deterministic_action,
@@ -294,12 +277,8 @@ class REPCQL(object):
             td_target = jax.lax.stop_gradient(
                 rewards + (1. - dones) * self.config.discount * target_q_values
             )
-            if self.config.reg_type == 'dr3':
-                qf1_loss = mse_loss(q1_pred, td_target) + self.config.norm_weight * jnp.mean(jnp.sum(q1_pred_lastlayer * q1_next_pred_lastlayer, axis=-1))
-                qf2_loss = mse_loss(q2_pred, td_target) + self.config.norm_weight * jnp.mean(jnp.sum(q2_pred_lastlayer * q2_next_pred_lastlayer, axis=-1))
-            else:
-                qf1_loss = mse_loss(q1_pred, td_target) + self.config.norm_weight * jnp.mean(jnp.sum(q1_pred_lastlayer * q1_pred_lastlayer, axis=-1))
-                qf2_loss = mse_loss(q2_pred, td_target) + self.config.norm_weight * jnp.mean(jnp.sum(q2_pred_lastlayer * q2_pred_lastlayer, axis=-1))
+            qf1_loss = mse_loss(q1_pred, td_target) 
+            qf2_loss = mse_loss(q2_pred, td_target)
 
             ### CQL
             if self.config.use_cql:
@@ -323,19 +302,13 @@ class REPCQL(object):
                     )
                     cql_next_actions = self.decoder.apply(self.rep.train_params['decoder'], next_observations, cql_next_actions_rep)
 
-                    _, cql_q1_rand = self.qf.apply(train_params['qf1'], observations, cql_random_actions)
-                    _, cql_q2_rand = self.qf.apply(train_params['qf2'], observations, cql_random_actions)
-                    _, cql_q1_current_actions = self.qf.apply(train_params['qf1'], observations, cql_current_actions)
-                    _, cql_q2_current_actions = self.qf.apply(train_params['qf2'], observations, cql_current_actions)
-                    _, cql_q1_next_actions = self.qf.apply(train_params['qf1'], observations, cql_next_actions)
-                    _, cql_q2_next_actions = self.qf.apply(train_params['qf2'], observations, cql_next_actions)
 
-                    # cql_q1_rand = self.qf.apply(train_params['qf1'], observations, cql_random_actions)
-                    # cql_q2_rand = self.qf.apply(train_params['qf2'], observations, cql_random_actions)
-                    # cql_q1_current_actions = self.qf.apply(train_params['qf1'], observations, cql_current_actions)
-                    # cql_q2_current_actions = self.qf.apply(train_params['qf2'], observations, cql_current_actions)
-                    # cql_q1_next_actions = self.qf.apply(train_params['qf1'], observations, cql_next_actions)
-                    # cql_q2_next_actions = self.qf.apply(train_params['qf2'], observations, cql_next_actions)
+                    cql_q1_rand = self.qf.apply(train_params['qf1'], observations, cql_random_actions)
+                    cql_q2_rand = self.qf.apply(train_params['qf2'], observations, cql_random_actions)
+                    cql_q1_current_actions = self.qf.apply(train_params['qf1'], observations, cql_current_actions)
+                    cql_q2_current_actions = self.qf.apply(train_params['qf2'], observations, cql_current_actions)
+                    cql_q1_next_actions = self.qf.apply(train_params['qf1'], observations, cql_next_actions)
+                    cql_q2_next_actions = self.qf.apply(train_params['qf2'], observations, cql_next_actions)
                 else:
                     rng, split_rng = jax.random.split(rng)
                     cql_random_actions = jax.random.uniform(
@@ -457,8 +430,6 @@ class REPCQL(object):
             average_qf1=aux_values['q1_pred'].mean(),
             average_qf2=aux_values['q2_pred'].mean(),
             average_target_q=aux_values['target_q_values'].mean(),
-            # train_action_l2=aux_values['train_action_l2'].mean(),
-            # decoded_action_l2=aux_values['decoded_action_l2'].mean(),
         )
 
         if self.config.use_cql:

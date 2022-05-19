@@ -18,23 +18,6 @@ def update_target_network(main_params, target_params, tau):
     )
 
 
-# def multiple_action_q_function(forward):
-#     # Forward the q function with multiple actions on each state, to be used as a decorator
-#     def wrapped(self, observations, actions, **kwargs):
-#         multiple_actions = False
-#         batch_size = observations.shape[0]
-#         if actions.ndim == 3 and observations.ndim == 2:
-#             multiple_actions = True
-#             observations = extend_and_repeat(observations, 1, actions.shape[1]).reshape(-1, observations.shape[-1])
-#             actions = actions.reshape(-1, actions.shape[-1])
-
-#         q_values = forward(self, observations, actions, **kwargs)
-#         if multiple_actions:
-#             q_values = q_values.reshape(batch_size, -1)
-#         return q_values
-#     return wrapped
-
-
 def multiple_action_q_function(forward):
     # Forward the q function with multiple actions on each state, to be used as a decorator
     def wrapped(self, observations, actions, **kwargs):
@@ -45,12 +28,29 @@ def multiple_action_q_function(forward):
             observations = extend_and_repeat(observations, 1, actions.shape[1]).reshape(-1, observations.shape[-1])
             actions = actions.reshape(-1, actions.shape[-1])
 
-        q_last_layer, q_values = forward(self, observations, actions, **kwargs)
+        q_values = forward(self, observations, actions, **kwargs)
         if multiple_actions:
-            q_last_layer = q_last_layer.reshape(batch_size, -1)
             q_values = q_values.reshape(batch_size, -1)
-        return q_last_layer, q_values
+        return q_values
     return wrapped
+
+
+# def multiple_action_q_function(forward):
+#     # Forward the q function with multiple actions on each state, to be used as a decorator
+#     def wrapped(self, observations, actions, **kwargs):
+#         multiple_actions = False
+#         batch_size = observations.shape[0]
+#         if actions.ndim == 3 and observations.ndim == 2:
+#             multiple_actions = True
+#             observations = extend_and_repeat(observations, 1, actions.shape[1]).reshape(-1, observations.shape[-1])
+#             actions = actions.reshape(-1, actions.shape[-1])
+
+#         q_last_layer, q_values = forward(self, observations, actions, **kwargs)
+#         if multiple_actions:
+#             q_last_layer = q_last_layer.reshape(batch_size, -1)
+#             q_values = q_values.reshape(batch_size, -1)
+#         return q_last_layer, q_values
+#     return wrapped
 
 def multiple_action_decode_function(forward):
     # Forward the rep function with multiple actions on each state, to be used as a decorator
@@ -99,10 +99,6 @@ class FullyConnectedNetwork(nn.Module):
                 )(x)
             else:
                 x = nn.Dense(h)(x)
-            # if self.batch_norm:
-            #     x = nn.BatchNorm(use_running_average=not train_mode, momentum=0.9,
-            #             epsilon=1e-5,
-            #             dtype=jnp.float32)(x)
             x = nn.relu(x)
 
         if self.orthogonal_init:
@@ -141,7 +137,6 @@ class FullyConnectedNetworkWithLastLayer(nn.Module):
                 )(x)
             else:
                 x = nn.Dense(h)(x)
-            # x = nn.LayerNorm()(x)
             x = nn.relu(x)
         normalized = jnp.reshape(jnp.sqrt(jnp.sum(x**2, axis=-1) + 1e-6), (batch,1))
         x = x / normalized
@@ -174,9 +169,8 @@ class FullyConnectedQFunction(nn.Module):
     @multiple_action_q_function
     def __call__(self, observations, actions):
         x = jnp.concatenate([observations, actions], axis=-1)
-        # x = FullyConnectedNetwork(output_dim=1, arch=self.arch, orthogonal_init=self.orthogonal_init)(x)
-        last_layer_x, x = FullyConnectedNetworkWithLastLayer(output_dim=1, arch=self.arch, orthogonal_init=self.orthogonal_init)(x)
-        return last_layer_x, jnp.squeeze(x, -1)
+        x = FullyConnectedNetwork(output_dim=1, arch=self.arch, orthogonal_init=self.orthogonal_init)(x)
+        return jnp.squeeze(x, -1)
 
 
 class TanhGaussianPolicy(nn.Module):
@@ -379,10 +373,6 @@ class ActionSeperatedDecoder(nn.Module):
                 )(jnp.concatenate([x, latent_actions], axis=-1))
             else:
                 x = nn.Dense(h)(jnp.concatenate([x, latent_actions], axis=-1))
-            # if self.batch_norm:
-            #     x = nn.BatchNorm(use_running_average=not train_mode, momentum=0.9,
-            #             epsilon=1e-5,
-            #             dtype=jnp.float32)(x)
             x = nn.relu(x)
 
 

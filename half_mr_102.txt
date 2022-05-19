@@ -1,0 +1,3 @@
+{'average_return': 4080.9539, 'average_traj_length': 1000.0, 'average_normalizd_return': 0.35127427661286764}
+{'average_return': 3851.8228, 'average_traj_length': 1000.0, 'average_normalizd_return': 0.3328185305258978}
+
