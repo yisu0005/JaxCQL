@@ -626,3 +626,4 @@ class SamplerEncoder(object):
         actions = self.act(self.params, rng, observations, actions)
         assert jnp.all(jnp.isfinite(actions))
         return jax.device_get(actions)
+
